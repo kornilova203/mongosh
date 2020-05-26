@@ -4,15 +4,14 @@ const ShellApi = require('../../../../shell-api/');
 _global = {
     ShellInternalState: ShellApi.ShellInternalState,
     Mongo: ShellApi.Mongo,
-    Database: ShellApi.signatures.Database,
-    Collection: ShellApi.signatures.Collection,
-    Cursor: ShellApi.signatures.Cursor,
-    AggregationCursor: ShellApi.signatures.AggregationCursor,
-    InsertOneResult: ShellApi.signatures.InsertOneResult,
-    InsertManyResult: ShellApi.signatures.InsertManyResult,
-    DeleteResult: ShellApi.signatures.DeleteResult,
-    UpdateResult: ShellApi.signatures.UpdateResult,
-    BulkWriteResult: ShellApi.signatures.BulkWriteResult,
-    CommandResult: ShellApi.signatures.CommandResult,
-    ShellBson: ShellApi.signatures.ShellBson
+    Database: ShellApi.Database,
+    Collection: ShellApi.Collection,
+    Cursor: ShellApi.Cursor,
+    AggregationCursor: ShellApi.AggregationCursor,
+    InsertOneResult: ShellApi.InsertOneResult,
+    InsertManyResult: ShellApi.InsertManyResult,
+    DeleteResult: ShellApi.DeleteResult,
+    UpdateResult: ShellApi.UpdateResult,
+    BulkWriteResult: ShellApi.BulkWriteResult,
+    CommandResult: ShellApi.CommandResult
 };

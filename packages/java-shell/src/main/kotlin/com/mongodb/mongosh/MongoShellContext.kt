@@ -59,10 +59,8 @@ internal class MongoShellContext(client: MongoClient) : Closeable {
         val global = context["_global"]!!
         context.removeMember("_global")
         val shellInternalState = global.getMember("ShellInternalState").newInstance(serviceProvider)
-        val shellBson = global["ShellBson"]!!
-//        shellInternalState.invokeMember("setCtx", context)
-        initContext(context, shellInternalState, shellBson)
-        shellInternalState.putMember("context", context)
+        shellInternalState.invokeMember("setCtx", context)
+        initContext(context)
         databaseClass = global["Database"]!!
         collectionClass = global["Collection"]!!
         cursorClass = global["Cursor"]!!
@@ -87,12 +85,7 @@ internal class MongoShellContext(client: MongoClient) : Closeable {
                 eval("new HexData(0, '').constructor"))
     }
 
-    private fun initContext(context: Value, shellInternalState: Value, shellBson: Value) {
-        context.putMember("use", shellInternalState["use"]!!.invokeMember("bind", shellInternalState))
-        context.putMember("show", shellInternalState["show"]!!.invokeMember("bind", shellInternalState))
-        context.putMember("it", shellInternalState["it"]!!.invokeMember("bind", shellInternalState))
-        context.putMember("db", shellInternalState["currentDb"]!!)
-        eval("(a, b) => Object.assign(a, b);").execute(context, shellBson)
+    private fun initContext(context: Value) {
         context.removeMember("Date")
         context.putMember("Date", eval("(dateHelper) => function inner() { return dateHelper(new.target !== undefined, ...arguments) }")
                 .execute(ProxyExecutable { args -> dateHelper(args[0].asBoolean(), args.drop(1)) }))
@@ -177,10 +170,10 @@ internal class MongoShellContext(client: MongoClient) : Closeable {
             v.instanceOf(collectionClass) -> CollectionResult(MongoShellCollection(v))
             v.instanceOf(cursorClass) -> FindCursorResult(FindCursor<Any?>(v, this))
             v.instanceOf(aggregationCursorClass) -> AggregationCursorResult(AggregationCursor<Any?>(v, this))
-            v.instanceOf(insertOneResultClass) -> InsertOneResult(v["acknowleged"]!!.asBoolean(), v["insertedId"]!!.asString())
-            v.instanceOf(insertManyResultClass) -> InsertManyResult(v["acknowleged"]!!.asBoolean(), extract(v["insertedIds"]!!).value as List<String>)
+            v.instanceOf(insertOneResultClass) -> InsertOneResult(v["acknowledged"]!!.asBoolean(), v["insertedId"]!!.asString())
+            v.instanceOf(insertManyResultClass) -> InsertManyResult(v["acknowledged"]!!.asBoolean(), extract(v["insertedIds"]!!).value as List<String>)
             v.instanceOf(commandResultClass) -> CommandResult(v["type"]!!.asString(), extract(v["value"]!!).value)
-            v.instanceOf(deleteResultClass) -> DeleteResult(v["acknowleged"]!!.asBoolean(), v["deletedCount"]!!.asLong())
+            v.instanceOf(deleteResultClass) -> DeleteResult(v["acknowledged"]!!.asBoolean(), v["deletedCount"]!!.asLong())
             v.instanceOf(bulkWriteResultClass) -> BulkWriteResult(
                     v["acknowledged"]!!.asBoolean(),
                     v["insertedCount"]!!.asLong(),
@@ -190,7 +183,7 @@ internal class MongoShellContext(client: MongoClient) : Closeable {
                     v["upsertedCount"]!!.asLong(),
                     (extract(v["upsertedIds"]!!) as ArrayResult).value)
             v.instanceOf(updateResultClass) -> {
-                val res = if (v["acknowleged"]!!.asBoolean()) {
+                val res = if (v["acknowledged"]!!.asBoolean()) {
                     val insertedId = v["insertedId"]
                     UpdateResult.acknowledged(
                             v["matchedCount"]!!.asLong(),
