@@ -1,27 +1,27 @@
 import Mongo from './mongo';
 import {
-  shellApiClassDefault,
   hasAsyncChild,
-  ShellApiClass,
   returnsPromise,
   returnType,
-  serverVersions
+  serverVersions,
+  ShellApiClass,
+  shellApiClassDefault
 } from './decorators';
-import { ServerVersions } from './enums';
-import { adaptAggregateOptions, validateExplainableVerbosity, checkUndefinedUpdate } from './helpers';
-import { DatabaseOptions, Document } from '@mongosh/service-provider-core';
+import {ServerVersions} from './enums';
+import {adaptAggregateOptions, checkUndefinedUpdate, validateExplainableVerbosity} from './helpers';
+import {DatabaseOptions, Document} from '@mongosh/service-provider-core';
 import {
   AggregationCursor,
+  BulkWriteResult,
   Cursor,
   Database,
-  Explainable,
-  BulkWriteResult,
   DeleteResult,
+  Explainable,
   InsertManyResult,
   InsertOneResult,
   UpdateResult
 } from './index';
-import { MongoshInvalidInputError } from '@mongosh/errors';
+import {MongoshInvalidInputError} from '@mongosh/errors';
 
 @shellApiClassDefault
 @hasAsyncChild
@@ -847,6 +847,19 @@ export default class Collection extends ShellApiClass {
       options,
       dbOptions
     );
+
+    console.log(result.upsertedId);
+
+    const res = new UpdateResult(
+        result.result.ok,
+        result.matchedCount,
+        result.modifiedCount,
+        result.upsertedCount,
+        result.upsertedId
+    );
+
+    console.log(res.insertedId);
+
 
     return new UpdateResult(
       result.result.ok,
