@@ -174,8 +174,10 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
     }
 
     @HostAccess.Export
-    override fun oplogReplay(): ServiceProviderCursor {
-        throw NotImplementedError("oplogReplay is not supported")
+    override fun oplogReplay(): Cursor {
+        checkQueryNotExecuted()
+        helper.oplogReplay()
+        return this
     }
 
     @HostAccess.Export
@@ -187,12 +189,15 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
 
     @HostAccess.Export
     override fun readPref(v: Value): Cursor {
+        checkQueryNotExecuted()
         throw NotImplementedError("readPref is not supported")
     }
 
     @HostAccess.Export
-    override fun returnKey(v: Boolean): ServiceProviderCursor {
-        throw NotImplementedError("returnKey is not supported")
+    override fun returnKey(v: Value): Cursor {
+        checkQueryNotExecuted()
+        helper.returnKey(if (v.isBoolean) v.asBoolean() else true)
+        return this
     }
 
     @HostAccess.Export
@@ -209,27 +214,29 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
 
     @HostAccess.Export
     override fun sort(spec: Value): Cursor {
-        throw NotImplementedError("sort is not supported")
+        checkQueryNotExecuted()
+        helper.sort(toDocument(context, spec))
+        return this
     }
 
     @HostAccess.Export
     override fun tailable(): Cursor {
-        throw NotImplementedError("tailable is not supported")
+        checkQueryNotExecuted()
+        helper.tailable()
+        return this
     }
 
     @HostAccess.Export
-    override fun toArray(): Value {
-        throw NotImplementedError("toArray is not supported")
+    override fun toArray(): Any? {
+        checkQueryNotExecuted()
+        return context.toJs(helper.toArray())
     }
 
     @HostAccess.Export
-    override fun explain(verbosity: String) {
-        throw NotImplementedError("explain is not supported")
-    }
-
-    @HostAccess.Export
-    fun explain(v: Value): Cursor {
-        throw NotImplementedError("explain is not supported")
+    override fun explain(verbosity: String): Any? {
+        checkQueryNotExecuted()
+        helper.explain(verbosity)
+        return helper.iterable.first()
     }
 
     private fun checkQueryNotExecuted() {

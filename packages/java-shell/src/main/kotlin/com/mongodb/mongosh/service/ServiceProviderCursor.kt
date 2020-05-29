@@ -9,7 +9,7 @@ interface ServiceProviderCursor {
   fun close(options: Value)
   fun clone(): ServiceProviderCursor
   fun isClosed(): Boolean
-  fun collation(spec: Value): ServiceProviderCursor
+  fun collation(v: Value): ServiceProviderCursor
   fun comment(v: String): ServiceProviderCursor
   fun count(): Int
   fun forEach(func: Value)
@@ -27,11 +27,11 @@ interface ServiceProviderCursor {
   fun oplogReplay(): ServiceProviderCursor
   fun projection(v: Value): ServiceProviderCursor
   fun readPref(v: Value): ServiceProviderCursor
-  fun returnKey(v: Boolean): ServiceProviderCursor
+  fun returnKey(v: Value): ServiceProviderCursor
   fun size(): Value
   fun skip(v: Int): ServiceProviderCursor
   fun sort(spec: Value): ServiceProviderCursor
   fun tailable(): ServiceProviderCursor
-  fun toArray(): Value
-  fun explain(verbosity: String)
+  fun toArray(): Any?
+  fun explain(verbosity: String): Any?
 }
