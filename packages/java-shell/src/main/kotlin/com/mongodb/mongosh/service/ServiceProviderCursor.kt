@@ -20,10 +20,10 @@ interface ServiceProviderCursor {
   fun limit(v: Int): ServiceProviderCursor
   fun map(func: Value): ServiceProviderCursor
   fun max(v: Value): ServiceProviderCursor
-  fun maxTimeMS(value: Int): ServiceProviderCursor
-  fun min(indexBounds: Value): ServiceProviderCursor
+  fun maxTimeMS(v: Long): ServiceProviderCursor
+  fun min(v: Value): ServiceProviderCursor
   fun next(): Any?
-  fun noServiceProviderCursorTimeout(): ServiceProviderCursor
+  fun noCursorTimeout(): ServiceProviderCursor
   fun oplogReplay(): ServiceProviderCursor
   fun projection(v: Value): ServiceProviderCursor
   fun readPref(v: Value): ServiceProviderCursor
