@@ -228,4 +228,9 @@ export default class Database extends ShellApiClass {
         dbOptions
     );
   }
+
+  @returnsPromise
+  async serverStatus(): Promise<any> {
+    return await this.runCommand({"serverStatus": 1});
+  }
 }
