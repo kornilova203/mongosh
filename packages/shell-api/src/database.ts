@@ -207,4 +207,11 @@ export default class Database extends ShellApiClass {
       writeConcern
     );
   }
+
+  @returnsPromise
+  async version(): Promise<any> {
+    this._emitDatabaseApiCall('version');
+    const buildinfo = await this.runCommand({"buildinfo": 1});
+    return buildinfo.version;
+  }
 }
