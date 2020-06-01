@@ -77,6 +77,7 @@ internal class MongoShellContext(client: MongoClient) : Closeable {
         context.putMember("Date", date)
         val isoDate = functionProducer.execute(ProxyExecutable { args -> dateHelper(true, args.toList()) })
         context.putMember("ISODate", isoDate)
+        context.putMember("UUID", functionProducer.execute(ProxyExecutable { args -> if (args.isEmpty()) UUID.randomUUID() else UUID.fromString(args[0].asString()) }))
     }
 
     private fun dateHelper(createObject: Boolean, args: List<Value>): Any {
