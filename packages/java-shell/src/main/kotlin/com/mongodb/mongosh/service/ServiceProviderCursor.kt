@@ -33,5 +33,5 @@ interface ServiceProviderCursor {
   fun sort(spec: Value): ServiceProviderCursor
   fun tailable(): ServiceProviderCursor
   fun toArray(): Any?
-  fun explain(verbosity: String): Any?
+  fun explain(verbosity: String?): Any?
 }
