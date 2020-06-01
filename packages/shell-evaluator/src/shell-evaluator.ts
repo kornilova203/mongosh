@@ -1,6 +1,5 @@
-import {
-  ShellInternalState
-} from '@mongosh/shell-api';
+import {ShellInternalState} from '@mongosh/shell-api';
+import {ReplPlatform} from "@mongosh/service-provider-core";
 
 interface Container {
   toggleTelemetry(boolean): void;
@@ -113,9 +112,12 @@ class ShellEvaluator {
     );
 
     if (this.isShellApiType(evaluationResult)) {
+      let type = evaluationResult.shellApiType();
       return {
-        type: evaluationResult.shellApiType(),
-        value: await evaluationResult.toReplString()
+        type: type,
+        value: this.internalState.initialServiceProvider.platform === ReplPlatform.JavaShell && (type == "AggregationCursor" || type == "Cursor")
+            ? evaluationResult
+            : await evaluationResult.toReplString()
       };
     }
 
