@@ -818,6 +818,10 @@ class CliServiceProvider implements ServiceProvider {
     };
   }
 
+  createCollection(database: string, collection: string, options?: Document, dbOptions?: DatabaseOptions): Promise<void> {
+    throw new Error("Method not implemented.");
+  }
+
   /**
    * Adds new indexes to a collection.
    *

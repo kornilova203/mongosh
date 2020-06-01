@@ -196,6 +196,10 @@ class StitchServiceProviderBrowser implements ServiceProvider {
     throw new Error("Method not implemented.");
   }
 
+  createCollection(database: string, collection: string, options?: Document, dbOptions?: DatabaseOptions): Promise<void> {
+    throw new Error("Method not implemented.");
+  }
+
   createIndexes(database: string, collection: string, indexSpecs: Document[], options?: Document, dbOptions?: DatabaseOptions): Promise<any> {
     throw new Error("Method not implemented.");
   }

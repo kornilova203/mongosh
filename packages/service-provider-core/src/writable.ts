@@ -320,6 +320,12 @@ interface Writable {
     size: number,
     options?: CommandOptions): Promise<Result>
 
+
+  createCollection(database: string,
+    collection: string,
+    options?: Document,
+    dbOptions?: DatabaseOptions): Promise<void>
+
   /**
    * Adds new indexes to a collection.
    *

@@ -12,7 +12,7 @@ import { ServerVersions } from './enums';
 import { adaptAggregateOptions } from './helpers';
 
 import {
-  Cursor as ServiceProviderCursor,
+  Cursor as ServiceProviderCursor, DatabaseOptions,
   Document,
   WriteConcern
 } from '@mongosh/service-provider-core';
@@ -213,5 +213,19 @@ export default class Database extends ShellApiClass {
     this._emitDatabaseApiCall('version');
     const buildinfo = await this.runCommand({"buildinfo": 1});
     return buildinfo.version;
+  }
+
+  @returnsPromise
+  async createCollection(collectionName: string, options: Document = {}): Promise<any> {
+    const dbOptions: DatabaseOptions = {};
+    if ('writeConcern' in options) {
+      Object.assign(dbOptions, options.writeConcern);
+    }
+    return await this.mongo.serviceProvider.createCollection(
+        this.name,
+        collectionName,
+        options,
+        dbOptions
+    );
   }
 }

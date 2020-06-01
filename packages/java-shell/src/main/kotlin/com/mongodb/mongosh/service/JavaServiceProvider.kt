@@ -429,6 +429,17 @@ internal class JavaServiceProvider(private val client: MongoClient, private val 
     }
 
     @HostAccess.Export
+    override fun createCollection(database: String, collection: String, options: Value?, dbOptions: Value?): Value = promise {
+        val options = toDocument(options, "options") ?: Document()
+        val dbOptions = toDocument(dbOptions, "dbOptions") ?: Document()
+        getDatabase(database, dbOptions).flatMap { db ->
+            convert(CreateCollectionOptions(), createCollectionOptionsConverters, createCollectionOptionsConverter, options).map { opt ->
+                db.createCollection(collection, opt)
+            }
+        }
+    }
+
+    @HostAccess.Export
     override fun createIndexes(database: String, collection: String, indexSpecs: Value?): Value = promise<Any?> {
         val indexSpecs = toList(indexSpecs, "indexSpecs") ?: emptyList()
         if (indexSpecs.any { it !is Document }) throw IllegalArgumentException("Index specs must be a list of documents. Got $indexSpecs")
