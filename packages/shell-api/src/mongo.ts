@@ -91,7 +91,7 @@ export default class Mongo extends ShellApiClass {
         return new CommandResult('ShowDatabasesResult', result.databases);
       case 'collections':
       case 'tables':
-        const collectionNames = await this.internalState.currentDb.getCollectionNames();
+        const collectionNames = await this.internalState.context.db.getCollectionNames();
         return new CommandResult('ShowCollectionsResult', collectionNames);
       default:
         const validArguments = [
