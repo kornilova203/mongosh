@@ -26,7 +26,7 @@ interface ServiceProviderCursor {
   fun noCursorTimeout(): ServiceProviderCursor
   fun oplogReplay(): ServiceProviderCursor
   fun projection(v: Value): ServiceProviderCursor
-  fun readPref(v: Value): ServiceProviderCursor
+  fun readPref(v: String, tagSet: Value?): ServiceProviderCursor
   fun returnKey(v: Value): ServiceProviderCursor
   fun size(): Value
   fun skip(v: Int): ServiceProviderCursor

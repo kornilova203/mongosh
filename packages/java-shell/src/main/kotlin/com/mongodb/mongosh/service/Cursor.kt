@@ -1,8 +1,10 @@
 package com.mongodb.mongosh.service
 
+import com.mongodb.Tag
+import com.mongodb.TagSet
 import com.mongodb.client.MongoCursor
-import com.mongodb.client.model.Collation
 import com.mongodb.mongosh.MongoShellContext
+import com.mongodb.mongosh.result.ArrayResult
 import com.mongodb.mongosh.result.DocumentResult
 import org.bson.Document
 import org.graalvm.polyglot.HostAccess
@@ -61,9 +63,7 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
         if (!v.hasMembers()) {
             throw IllegalArgumentException("Expected one argument of type object. Got: $v")
         }
-        val collation = convert(Collation.builder(), collationConverters, collationDefaultConverter, toDocument(context, v))
-                .getOrThrow()
-                .build()
+        val collation = toDocument(context, v)
         helper.collation(collation)
         return this
     }
@@ -188,9 +188,24 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
     }
 
     @HostAccess.Export
-    override fun readPref(v: Value): Cursor {
+    override fun readPref(v: String, tagSet: Value?): Cursor {
         checkQueryNotExecuted()
-        throw NotImplementedError("readPref is not supported")
+        val tagSetList = toList(tagSet, "tagSet")?.filterIsInstance<Document>()
+        val tags = tagSetList
+                ?.map { tagSet ->
+                    val listOfTags = tagSet.keys.mapTo(mutableListOf()) { key -> Tag(key, tagSet[key] as String) }
+                    TagSet(listOfTags)
+                }
+        helper = helper.readPrev(v, tags)
+        return this
+    }
+
+    private fun toList(value: Value?, fieldName: String): List<Any?>? {
+        if (value == null || value.isNull) return null
+        if (!value.hasArrayElements()) {
+            throw IllegalArgumentException("$fieldName should be a list: $value")
+        }
+        return (context.extract(value) as ArrayResult).value
     }
 
     @HostAccess.Export

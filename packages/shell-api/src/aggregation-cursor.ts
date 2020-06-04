@@ -56,6 +56,12 @@ export default class AggregationCursor extends ShellApiClass {
     return this.cursor.forEach(f);
   }
 
+  @returnType('AggregationCursor')
+  readPref(preference: string, tagSet?: Document[]): AggregationCursor {
+    this.cursor.readPref(preference, tagSet);
+    return this;
+  }
+
   @returnsPromise
   hasNext(): Promise<boolean> {
     return this.cursor.hasNext();

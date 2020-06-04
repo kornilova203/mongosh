@@ -181,8 +181,8 @@ export default class Cursor extends ShellApiClass {
   }
 
   @returnType('Cursor')
-  readPref(preference: string): Cursor {
-    this.cursor.readPref(preference);
+  readPref(preference: string, tagSet?: Document[]): Cursor {
+    this.cursor.readPref(preference, tagSet);
     return this;
   }
 
