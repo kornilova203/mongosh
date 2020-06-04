@@ -62,6 +62,12 @@ export default class AggregationCursor extends ShellApiClass {
     return this;
   }
 
+  @returnType('AggregationCursor')
+  readConcern(level: string): AggregationCursor {
+    this.cursor.readConcern(level);
+    return this;
+  }
+
   @returnsPromise
   hasNext(): Promise<boolean> {
     return this.cursor.hasNext();

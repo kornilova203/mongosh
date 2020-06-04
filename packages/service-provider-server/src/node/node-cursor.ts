@@ -299,6 +299,10 @@ class NodeCursor implements Cursor {
     return this;
   }
 
+  readConcern(level: string): NodeCursor {
+    throw new Error("Method not implemented.");
+  }
+
   /**
    * Set the cursor to return the index field.
    *

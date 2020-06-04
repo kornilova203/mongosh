@@ -188,6 +188,13 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
     }
 
     @HostAccess.Export
+    override fun readConcern(v: String): ServiceProviderCursor {
+        checkQueryNotExecuted()
+        helper = helper.readConcern(v)
+        return this
+    }
+
+    @HostAccess.Export
     override fun readPref(v: String, tagSet: Value?): Cursor {
         checkQueryNotExecuted()
         val tagSetList = toList(tagSet, "tagSet")?.filterIsInstance<Document>()

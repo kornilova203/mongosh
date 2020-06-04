@@ -186,6 +186,12 @@ export default class Cursor extends ShellApiClass {
     return this;
   }
 
+  @returnType('AggregationCursor')
+  readConcern(level: string): Cursor {
+    this.cursor.readConcern(level);
+    return this;
+  }
+
   @returnType('Cursor')
   @serverVersions(['3.2.0', ServerVersions.latest])
   returnKey(enabled: boolean): Cursor {

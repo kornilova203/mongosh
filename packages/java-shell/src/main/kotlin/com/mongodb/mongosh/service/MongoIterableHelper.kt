@@ -42,6 +42,7 @@ internal open class MongoIterableHelper<T : MongoIterable<out Any?>>(val iterabl
     open fun tailable(): Unit = throw NotImplementedError("tailable is not supported")
     open fun explain(verbosity: String?): Any? = throw NotImplementedError("explain is not supported")
     open fun readPrev(v: String, tags: List<TagSet>?): MongoIterableHelper<*> = throw NotImplementedError("readPrev is not supported")
+    open fun readConcern(v: String): MongoIterableHelper<*> = throw NotImplementedError("readConcern is not supported")
 }
 
 internal data class AggregateCreateOptions(val db: MongoDatabase,
@@ -68,6 +69,14 @@ internal class AggregateIterableHelper(iterable: AggregateIterable<out Any?>,
         check(createOptions != null) { "createOptions were not saved" }
         val newDb = if (tags == null) createOptions.db.withReadPreference(ReadPreference.valueOf(v))
         else createOptions.db.withReadPreference(ReadPreference.valueOf(v, tags))
+        val newCreateOptions = createOptions.copy(db = newDb)
+        val newIterable = aggregate(newCreateOptions)
+        return AggregateIterableHelper(newIterable, context, newCreateOptions)
+    }
+
+    override fun readConcern(v: String): AggregateIterableHelper {
+        check(createOptions != null) { "createOptions were not saved" }
+        val newDb = createOptions.db.withReadConcern(ReadConcern(ReadConcernLevel.fromString(v)))
         val newCreateOptions = createOptions.copy(db = newDb)
         val newIterable = aggregate(newCreateOptions)
         return AggregateIterableHelper(newIterable, context, newCreateOptions)
@@ -124,6 +133,15 @@ internal class FindIterableHelper(iterable: FindIterable<out Any?>,
         val newIterable = find(newCreateOptions)
         return FindIterableHelper(newIterable, context, newCreateOptions)
     }
+
+    override fun readConcern(v: String): FindIterableHelper {
+        check(createOptions != null) { "createOptions were not saved" }
+        val newDb = createOptions.db.withReadConcern(ReadConcern(ReadConcernLevel.fromString(v)))
+        val newCreateOptions = createOptions.copy(db = newDb)
+        val newIterable = find(newCreateOptions)
+        return FindIterableHelper(newIterable, context, newCreateOptions)
+    }
+
 
     private fun set(key: String, value: Any?) {
         val options = createOptions?.options ?: Document()

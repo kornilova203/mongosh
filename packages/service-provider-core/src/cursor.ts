@@ -209,6 +209,9 @@ interface Cursor {
    */
   readPref(mode: string, tagSet?: Document[]): Cursor;
 
+
+  readConcern(level: string): Cursor;
+
   /**
    * Get the documents from the cursor as an array of objects.
    */

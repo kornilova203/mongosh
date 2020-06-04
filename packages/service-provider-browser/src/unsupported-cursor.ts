@@ -111,6 +111,10 @@ class UnsupportedCursor implements Cursor {
     throw new Error("Method not implemented.");
   }
 
+  readConcern(level: string): Cursor {
+    throw new Error("Method not implemented.");
+  }
+
   returnKey(enabled: boolean): Cursor {
     throw new Error("Method not implemented.");
   }
