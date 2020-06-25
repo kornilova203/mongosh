@@ -45,7 +45,7 @@ internal class Cursor(private var helper: MongoIterableHelper<*>, private val co
     @HostAccess.Export
     override fun close(options: Value) {
         closed = true
-        getOrCreateIterator().close()
+        iterator?.close()
     }
 
     @HostAccess.Export
