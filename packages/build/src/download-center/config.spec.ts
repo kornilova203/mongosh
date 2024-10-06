@@ -1,8 +1,9 @@
 import type { DownloadCenterConfig } from '@mongodb-js/dl-center/dist/download-center-config';
-import type { PackageInformationProvider } from '../packaging';
+import { type PackageInformationProvider } from '../packaging';
 import { expect } from 'chai';
 import sinon from 'sinon';
-import type { PackageVariant } from '../config';
+import type { Config } from '../config';
+import { type PackageVariant } from '../config';
 import {
   createVersionConfig,
   createDownloadCenterConfig,
@@ -10,11 +11,13 @@ import {
   createAndPublishDownloadCenterConfig,
   createJsonFeedEntry,
 } from './config';
-import { createServer as createHTTPServer } from 'http';
-import type { Server as HTTPServer } from 'http';
-import { once } from 'events';
+import { promises as fs } from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
+import { createServer } from 'http';
+import { once } from 'events';
+import { runDownloadAndListArtifacts } from '../run-download-and-list-artifacts';
+import type { AddressInfo } from 'net';
 
 const packageInformation = (version: string) =>
   ((packageVariant: PackageVariant) => {
@@ -34,6 +37,48 @@ const packageInformation = (version: string) =>
   }) as PackageInformationProvider;
 
 describe('DownloadCenter config', function () {
+  let outputDir: string;
+  before(async function () {
+    outputDir = path.join(
+      __dirname,
+      '..',
+      '..',
+      '..',
+      '..',
+      'tmp',
+      `downloadcenter-outputdir-${Date.now()}`
+    );
+    await fs.mkdir(outputDir, { recursive: true });
+
+    const httpServer = createServer((req, res) => {
+      res.end(req.url);
+    });
+    httpServer.listen(0);
+    await once(httpServer, 'listening');
+    try {
+      const testVersions = ['2.0.1', '2.0.0', '1.2.2'];
+
+      for (const version of testVersions) {
+        const config: Partial<Config> = {
+          outputDir,
+          packageInformation: packageInformation(version),
+        };
+        await runDownloadAndListArtifacts(
+          config as Config,
+          `http://localhost:${(httpServer.address() as AddressInfo).port}/`,
+          'append-to-hash-file-for-testing'
+        );
+      }
+    } finally {
+      httpServer.close();
+      await once(httpServer, 'close');
+    }
+  });
+
+  after(async function () {
+    await fs.rm(outputDir, { recursive: true });
+  });
+
   describe('createVersionConfig', function () {
     it('sets the version correctly', function () {
       const version = createVersionConfig(packageInformation('1.2.2'));
@@ -195,10 +240,9 @@ describe('DownloadCenter config', function () {
     let downloadConfig: sinon.SinonStub;
     let uploadAsset: sinon.SinonStub;
     let downloadAsset: sinon.SinonStub;
-    let mockHttpServer: HTTPServer;
     let baseUrl: string;
 
-    beforeEach(async function () {
+    beforeEach(function () {
       uploadConfig = sinon.stub();
       downloadConfig = sinon.stub();
       uploadAsset = sinon.stub();
@@ -211,18 +255,7 @@ describe('DownloadCenter config', function () {
         uploadAsset,
         downloadAsset,
       });
-      mockHttpServer = createHTTPServer((req, res) => {
-        res.writeHead(200, undefined, { 'content-type': 'text/plain' });
-        res.end(req.url);
-      });
-      mockHttpServer.listen(0);
-      await once(mockHttpServer, 'listening');
-      baseUrl = `http://127.0.0.1:${(mockHttpServer.address() as any).port}/`;
-    });
-
-    afterEach(async function () {
-      mockHttpServer.close();
-      await once(mockHttpServer, 'close');
+      baseUrl = `http://127.0.0.1/`;
     });
 
     context('when a configuration does not exist', function () {
@@ -230,6 +263,7 @@ describe('DownloadCenter config', function () {
         downloadConfig.throws({ code: 'NoSuchKey' });
 
         await createAndPublishDownloadCenterConfig(
+          outputDir,
           packageInformation('2.0.1'),
           'accessKey',
           'secretKey',
@@ -287,6 +321,7 @@ describe('DownloadCenter config', function () {
 
       it('publishes the created configuration', async function () {
         await createAndPublishDownloadCenterConfig(
+          outputDir,
           packageInformation('1.2.2'),
           'accessKey',
           'secretKey',
@@ -384,6 +419,7 @@ describe('DownloadCenter config', function () {
         downloadAsset.returns(JSON.stringify(existingUploadedJsonFeed));
 
         await createAndPublishDownloadCenterConfig(
+          outputDir,
           packageInformation('2.0.0'),
           'accessKey',
           'secretKey',
@@ -477,6 +513,7 @@ describe('DownloadCenter config', function () {
       ].filter(Boolean);
 
       const mongoshJsonFeedEntry = await createJsonFeedEntry(
+        outputDir,
         packageInformation('2.0.0'),
         'skip://'
       );
@@ -485,7 +522,7 @@ describe('DownloadCenter config', function () {
       ];
       const mongoshTargets = [
         ...new Set(mongoshJsonFeedEntry.downloads.flatMap((d) => d.targets)),
-      ].filter((t) => t !== 'debian12'); // debian12 is not part of the server platform list at the time of writing
+      ].filter((t) => t !== 'ubuntu2404'); // ubuntu2404 is not part of the server platform list at the time of writing
 
       for (const arch of mongoshArchs) expect(serverArchs).to.include(arch);
       for (const target of mongoshTargets)

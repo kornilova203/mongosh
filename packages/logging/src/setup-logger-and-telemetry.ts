@@ -36,6 +36,7 @@ import { inspect } from 'util';
 import type { MongoLogWriter } from 'mongodb-log-writer';
 import { mongoLogId } from 'mongodb-log-writer';
 import type { MongoshAnalytics } from './analytics-helpers';
+import { hookLogger } from '@mongodb-js/devtools-connect';
 
 /**
  * A helper class for keeping track of how often specific events occurred.
@@ -111,15 +112,9 @@ export function setupLoggerAndTelemetry(
     session_id,
   };
 
-  const getTelemetryUserIdentity = () => {
-    if (telemetryAnonymousId) {
-      return {
-        anonymousId: telemetryAnonymousId,
-      };
-    }
-
-    return { userId };
-  };
+  const getTelemetryUserIdentity = () => ({
+    anonymousId: telemetryAnonymousId ?? userId,
+  });
 
   // We emit different analytics events for loading files and evaluating scripts
   // depending on whether we're already in the REPL or not yet. We store the
@@ -146,31 +141,34 @@ export function setupLoggerAndTelemetry(
   );
 
   bus.on('mongosh:connect', function (args: ConnectEvent) {
-    const connectionUri = redactURICredentials(args.uri);
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { uri: _uri, ...argsWithoutUri } = args;
-    const params = {
-      session_id,
-      userId,
-      telemetryAnonymousId,
-      connectionUri,
-      ...argsWithoutUri,
+    const { uri, resolved_hostname, ...argsWithoutUriAndHostname } = args;
+    const connectionUri = uri && redactURICredentials(uri);
+    const atlasHostname = {
+      atlas_hostname: args.is_atlas ? resolved_hostname : null,
     };
+    const properties = {
+      ...trackProperties,
+      ...argsWithoutUriAndHostname,
+      ...atlasHostname,
+    };
+
     log.info(
       'MONGOSH',
       mongoLogId(1_000_000_004),
       'connect',
       'Connecting to server',
-      params
+      {
+        userId,
+        telemetryAnonymousId,
+        connectionUri,
+        ...properties,
+      }
     );
 
     analytics.track({
       ...getTelemetryUserIdentity(),
       event: 'New Connection',
-      properties: {
-        ...trackProperties,
-        ...argsWithoutUri,
-      },
+      properties,
     });
   });
 
@@ -189,6 +187,7 @@ export function setupLoggerAndTelemetry(
       properties: {
         ...trackProperties,
         is_interactive: args.isInteractive,
+        js_context: args.jsContext,
         ...normalisedTimings,
       },
     });
@@ -219,17 +218,13 @@ export function setupLoggerAndTelemetry(
     }) {
       if (updatedTelemetryUserIdentity.anonymousId) {
         telemetryAnonymousId = updatedTelemetryUserIdentity.anonymousId;
-        analytics.identify({
-          anonymousId: updatedTelemetryUserIdentity.anonymousId,
-          traits: userTraits,
-        });
       } else {
         userId = updatedTelemetryUserIdentity.userId;
-        analytics.identify({
-          userId: updatedTelemetryUserIdentity.userId,
-          traits: userTraits,
-        });
       }
+      analytics.identify({
+        ...getTelemetryUserIdentity(),
+        traits: userTraits,
+      });
       log.info('MONGOSH', mongoLogId(1_000_000_005), 'config', 'User updated');
     }
   );
@@ -640,7 +635,10 @@ export function setupLoggerAndTelemetry(
 
   const deprecatedApiCalls = new MultiSet<Pick<ApiEvent, 'class' | 'method'>>();
   const apiCalls = new MultiSet<Pick<ApiEvent, 'class' | 'method'>>();
+  let apiCallTrackingEnabled = false;
   bus.on('mongosh:api-call', function (ev: ApiEvent) {
+    // Only track if we have previously seen a mongosh:evaluate-started call
+    if (!apiCallTrackingEnabled) return;
     if (ev.deprecated) {
       deprecatedApiCalls.add({ class: ev.class, method: ev.method });
     }
@@ -649,6 +647,7 @@ export function setupLoggerAndTelemetry(
     }
   });
   bus.on('mongosh:evaluate-started', function () {
+    apiCallTrackingEnabled = true;
     // Clear API calls before evaluation starts. This is important because
     // some API calls are also emitted by mongosh CLI repl internals,
     // but we only care about those emitted from user code (i.e. during
@@ -688,13 +687,13 @@ export function setupLoggerAndTelemetry(
     }
     deprecatedApiCalls.clear();
     apiCalls.clear();
+    apiCallTrackingEnabled = false;
   });
 
   // Log ids 1_000_000_034 through 1_000_000_042 are reserved for the
   // devtools-connect package which was split out from mongosh.
   // 'mongodb' is not supported in startup snapshots yet.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { hookLogger } = require('@mongodb-js/devtools-connect');
   hookLogger(bus, log, 'mongosh', redactURICredentials);
 
   bus.on('mongosh-sp:reset-connection-options', function () {

@@ -8,7 +8,6 @@ import type {
   FindOneAndUpdateOptions,
   DeleteOptions,
   MapReduceOptions,
-  KMSProviders,
   ExplainOptions,
 } from '@mongosh/service-provider-core';
 import {
@@ -27,7 +26,7 @@ import type {
   bson,
 } from '@mongosh/service-provider-core';
 import type { ClientSideFieldLevelEncryptionOptions } from './field-level-encryption';
-import type { AutoEncryptionOptions } from 'mongodb';
+import { type AutoEncryptionOptions } from 'mongodb';
 import { shellApiType } from './enums';
 import type { AbstractCursor } from './abstract-cursor';
 import type ChangeStreamCursor from './change-stream-cursor';
@@ -91,6 +90,17 @@ export function validateExplainableVerbosity(
 function getAssertCaller(caller?: string): string {
   return caller ? ` (${caller})` : '';
 }
+
+// Fields to add to a $match/filter on config.collections to only get
+// collections that are actually sharded
+export const onlyShardedCollectionsInConfigFilter = {
+  // dropped is gone on newer server versions, so check for !== true
+  // rather than for === false (SERVER-51880 and related)
+  dropped: { $ne: true },
+  // unsplittable introduced in SPM-3364 to mark unsharded collections
+  // that are still being tracked in the catalog
+  unsplittable: { $ne: true },
+} as const;
 
 export function assertArgsDefinedType(
   args: any[],
@@ -487,33 +497,45 @@ export async function getPrintableShardStatus(
   ]);
   result.balancer = balancerRes;
 
-  const databases = await (await configDB.getCollection('databases').find())
-    .sort({ name: 1 })
-    .toArray();
-
+  // All databases in config.databases + those implicitly referenced
+  // by a sharded collection in config.collections
+  // (could become a single pipeline using $unionWith when we drop 4.2 server support)
+  const [databases, collections] = await Promise.all([
+    (async () =>
+      await (await configDB.getCollection('databases').find())
+        .sort({ _id: 1 })
+        .toArray())(),
+    (async () =>
+      await (
+        await configDB.getCollection('collections').find({
+          ...onlyShardedCollectionsInConfigFilter,
+        })
+      )
+        .sort({ _id: 1 })
+        .toArray())(),
+  ]);
   // Special case the config db, since it doesn't have a record in config.databases.
   databases.push({ _id: 'config', primary: 'config', partitioned: true });
+
+  for (const coll of collections) {
+    if (!databases.find((db) => coll._id.startsWith(db._id + '.'))) {
+      databases.push({ _id: coll._id.split('.')[0] });
+    }
+  }
+
   databases.sort((a: any, b: any): number => {
     return a._id.localeCompare(b._id);
   });
 
-  result.databases = await Promise.all(
-    databases.map(async (db) => {
-      const escapeRegex = (string: string): string => {
-        return string.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-      };
-      const colls = await (
-        await configDB
-          .getCollection('collections')
-          .find({ _id: new RegExp('^' + escapeRegex(db._id) + '\\.') })
-      )
-        .sort({ _id: 1 })
-        .toArray();
+  result.databases = (
+    await Promise.all(
+      databases.map(async (db) => {
+        const colls = collections.filter((coll) =>
+          coll._id.startsWith(db._id + '.')
+        );
 
-      const collList: any = await Promise.all(
-        colls
-          .filter((coll) => !coll.dropped)
-          .map(async (coll) => {
+        const collList = await Promise.all(
+          colls.map(async (coll) => {
             const collRes = {} as any;
             collRes.shardKey = coll.key;
             collRes.unique = !!coll.unique;
@@ -533,6 +555,7 @@ export async function getPrintableShardStatus(
                 { noBalance: coll.noBalance },
               ];
             }
+
             const chunksRes = [];
             const chunksCollMatch = buildConfigChunksCollectionMatch(coll);
             const chunks = await (
@@ -543,21 +566,20 @@ export async function getPrintableShardStatus(
                 { $sort: { shard: 1 } },
               ])
             ).toArray();
-            let totalChunks = 0;
+
             collRes.chunkMetadata = [];
+
             chunks.forEach((z: any) => {
-              totalChunks += z.nChunks;
               collRes.chunkMetadata.push({
                 shard: z.shard,
                 nChunks: z.nChunks,
               });
             });
 
-            // NOTE: this will return the chunk info as a string, and will print ugly BSON
-            if (totalChunks < 20 || verbose) {
-              for await (const chunk of (
-                await chunksColl.find(chunksCollMatch)
-              ).sort({ min: 1 })) {
+            for await (const chunk of (
+              await chunksColl.find(chunksCollMatch)
+            ).sort({ min: 1 })) {
+              if (chunksRes.length < 20 || verbose) {
                 const c = {
                   min: chunk.min,
                   max: chunk.max,
@@ -584,11 +606,12 @@ export async function getPrintableShardStatus(
                 );
                 if (chunk.jumbo) c.jumbo = 'yes';
                 chunksRes.push(c);
+              } else if (chunksRes.length === 20 && !verbose) {
+                chunksRes.push(
+                  'too many chunks to print, use verbose if you want to force print'
+                );
+                break;
               }
-            } else {
-              chunksRes.push(
-                'too many chunks to print, use verbose if you want to force print'
-              );
             }
 
             const tagsRes: any[] = [];
@@ -597,20 +620,29 @@ export async function getPrintableShardStatus(
                 ns: coll._id,
               })
             ).sort({ min: 1 })) {
-              tagsRes.push({
-                tag: tag.tag,
-                min: tag.min,
-                max: tag.max,
-              });
+              if (tagsRes.length < 20 || verbose) {
+                tagsRes.push({
+                  tag: tag.tag,
+                  min: tag.min,
+                  max: tag.max,
+                });
+              }
+              if (tagsRes.length === 20 && !verbose) {
+                tagsRes.push(
+                  'too many tags to print, use verbose if you want to force print'
+                );
+                break;
+              }
             }
             collRes.chunks = chunksRes;
             collRes.tags = tagsRes;
-            return [coll._id, collRes];
+            return [coll._id, collRes] as const;
           })
-      );
-      return { database: db, collections: Object.fromEntries(collList) };
-    })
-  );
+        );
+        return { database: db, collections: Object.fromEntries(collList) };
+      })
+    )
+  ).filter((dbEntry) => !!dbEntry);
 
   delete result.shardingVersion.currentVersion;
   return result;
@@ -751,6 +783,7 @@ export type FindAndModifyMethodShellOptions = {
   remove?: boolean;
   new?: boolean;
   fields?: Document;
+  projection?: Document;
   upsert?: boolean;
   bypassDocumentValidation?: boolean;
   writeConcern?: Document;
@@ -915,7 +948,8 @@ export function processFLEOptions(
   } else {
     autoEncryption.kmsProviders = {
       ...fleOptions.kmsProviders,
-    } as KMSProviders;
+      // cast can go away after https://github.com/mongodb/node-mongodb-native/commit/d85f827aca56603b5d7b64f853c190473be81b6f
+    } as (typeof autoEncryption)['kmsProviders'];
   }
 
   if (fleOptions.schemaMap) {
@@ -1163,3 +1197,7 @@ export function buildConfigChunksCollectionMatch(
     ? { uuid: configCollectionsInfo.uuid } // new format
     : { ns: configCollectionsInfo._id }; // old format
 }
+
+export const aggregateBackgroundOptionNotSupportedHelp =
+  'the background option is not supported by the aggregate method and will be ignored, ' +
+  'use runCommand to use { background: true } with Atlas Data Federation';

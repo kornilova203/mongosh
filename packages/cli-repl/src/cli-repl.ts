@@ -12,14 +12,14 @@ import type { CliOptions, DevtoolsConnectOptions } from '@mongosh/arg-parser';
 import { SnippetManager } from '@mongosh/snippet-manager';
 import { Editor } from '@mongosh/editor';
 import { redactSensitiveData } from '@mongosh/history';
-import type Analytics from 'analytics-node';
+import type { Analytics as SegmentAnalytics } from '@segment/analytics-node';
 import askpassword from 'askpassword';
 import { EventEmitter, once } from 'events';
 import yaml from 'js-yaml';
 import ConnectionString from 'mongodb-connection-string-url';
 import semver from 'semver';
 import type { Readable, Writable } from 'stream';
-import { buildInfo } from './build-info';
+import { buildInfo, getGlibcVersion } from './build-info';
 import type { StyleDefinition } from './clr';
 import type { ShellHomePaths } from './config-directory';
 import { ConfigManager, ShellHomeDirectory } from './config-directory';
@@ -44,10 +44,15 @@ import {
 } from '@mongosh/types';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { promisify } from 'util';
 import { getOsInfo } from './get-os-info';
 import { UpdateNotificationManager } from './update-notification-manager';
 import { getTimingData, markTime, summariseTimingData } from './startup-timing';
+import type { IdPInfo } from 'mongodb';
+import type {
+  AgentWithInitialize,
+  DevtoolsProxyOptions,
+} from '@mongodb-js/devtools-proxy-support';
+import { useOrCreateAgent } from '@mongodb-js/devtools-proxy-support';
 
 /**
  * Connecting text key.
@@ -78,6 +83,12 @@ export type CliReplOptions = {
   input: Readable;
   /** The stream to write shell output to. */
   output: Writable;
+  /**
+   * The stream to write prompt output to when requesting data from user, like password.
+   * Helpful when user wants to redirect the output to a file or null device.
+   * If not provided, the `output` stream will be used.
+   */
+  promptOutput?: Writable;
   /** The set of home directory paths used by this shell instance. */
   shellHomePaths: ShellHomePaths;
   /** The ordered list of paths in which to look for a global configuration file. */
@@ -100,7 +111,7 @@ type CliUserConfigOnDisk = Partial<CliUserConfig> &
 export class CliRepl implements MongoshIOProvider {
   mongoshRepl: MongoshNodeRepl;
   bus: MongoshBus;
-  cliOptions: CliOptions;
+  cliOptions: Readonly<CliOptions>;
   getCryptLibraryPaths?: (bus: MongoshBus) => Promise<CryptLibraryPathResult>;
   cachedCryptLibraryPath?: Promise<CryptLibraryPathResult>;
   shellHomeDirectory: ShellHomeDirectory;
@@ -112,15 +123,22 @@ export class CliRepl implements MongoshIOProvider {
   logWriter?: MongoLogWriter;
   input: Readable;
   output: Writable;
+  promptOutput: Writable;
   analyticsOptions?: AnalyticsOptions;
-  segmentAnalytics?: Analytics;
+  segmentAnalytics?: SegmentAnalytics;
   toggleableAnalytics: ToggleableAnalytics = new ToggleableAnalytics();
   warnedAboutInaccessibleFiles = false;
   onExit: (code?: number) => Promise<never>;
   closing = false;
   isContainerizedEnvironment = false;
   hasOnDiskTelemetryId = false;
-  updateNotificationManager = new UpdateNotificationManager();
+  proxyOptions: DevtoolsProxyOptions = {
+    useEnvironmentVariableProxies: true,
+  };
+  agent: AgentWithInitialize | undefined;
+  updateNotificationManager: UpdateNotificationManager;
+  fetchMongoshUpdateUrlRegardlessOfCiEnvironment = false; // for testing
+  cachedGlibcVersion: null | string | undefined = null;
 
   /**
    * Instantiate the new CLI Repl.
@@ -130,6 +148,7 @@ export class CliRepl implements MongoshIOProvider {
     this.cliOptions = options.shellCliOptions;
     this.input = options.input;
     this.output = options.output;
+    this.promptOutput = options.promptOutput ?? options.output;
     this.analyticsOptions = options.analyticsOptions;
     this.onExit = options.onExit;
 
@@ -173,10 +192,16 @@ export class CliRepl implements MongoshIOProvider {
     this.logManager = new MongoLogManager({
       directory: this.shellHomeDirectory.localPath('.'),
       retentionDays: 30,
-      maxLogFileCount: 100,
+      maxLogFileCount: +(
+        process.env.MONGOSH_TEST_ONLY_MAX_LOG_FILE_COUNT || 100
+      ),
       onerror: (err: Error) => this.bus.emit('mongosh:error', err, 'log'),
       onwarn: (err: Error, path: string) =>
         this.warnAboutInaccessibleFile(err, path),
+    });
+    this.agent = useOrCreateAgent(this.proxyOptions);
+    this.updateNotificationManager = new UpdateNotificationManager({
+      proxyOptions: this.agent,
     });
 
     // We can't really do anything meaningful if the output stream is broken or
@@ -186,14 +211,25 @@ export class CliRepl implements MongoshIOProvider {
       this.bus.emit('mongosh:error', err, 'io');
     });
 
+    let jsContext = this.cliOptions.jsContext;
+    const { willEnterInteractiveMode, quiet } = CliRepl.getFileAndEvalInfo(
+      this.cliOptions
+    );
+    if (jsContext === 'auto' || !jsContext) {
+      jsContext = willEnterInteractiveMode ? 'repl' : 'plain-vm';
+    }
+
     this.mongoshRepl = new MongoshNodeRepl({
       ...options,
+      shellCliOptions: { ...this.cliOptions, jsContext, quiet },
       nodeReplOptions: options.nodeReplOptions ?? {
         terminal: process.env.MONGOSH_FORCE_TERMINAL ? true : undefined,
       },
       bus: this.bus,
       ioProvider: this,
     });
+
+    this.setupOIDCTokenDumpListener();
   }
 
   async getIsContainerizedEnvironment() {
@@ -215,7 +251,8 @@ export class CliRepl implements MongoshIOProvider {
   get forceDisableTelemetry(): boolean {
     return (
       this.globalConfig?.forceDisableTelemetry ||
-      (this.isContainerizedEnvironment && !this.mongoshRepl.isInteractive)
+      (this.isContainerizedEnvironment && !this.mongoshRepl.isInteractive) ||
+      !!process.env.MONGOSH_FORCE_DISABLE_TELEMETRY_FOR_TESTING
     );
   }
 
@@ -265,7 +302,8 @@ export class CliRepl implements MongoshIOProvider {
     await this.logManager.cleanupOldLogfiles();
     markTime(TimingCategories.Logging, 'cleaned up log files');
     const logger = await this.logManager.createLogWriter();
-    if (!this.cliOptions.quiet) {
+    const { quiet } = CliRepl.getFileAndEvalInfo(this.cliOptions);
+    if (!quiet) {
       this.output.write(`Current Mongosh Log ID:\t${logger.logId}\n`);
     }
     this.logWriter = logger;
@@ -348,7 +386,7 @@ export class CliRepl implements MongoshIOProvider {
       delete driverOptions.autoEncryption;
     }
 
-    driverOptions = await this.prepareOIDCOptions(driverOptions);
+    driverOptions = await this.prepareOIDCOptions(driverUri, driverOptions);
     markTime(TimingCategories.DriverSetup, 'prepared OIDC options');
 
     let initialServiceProvider;
@@ -373,12 +411,12 @@ export class CliRepl implements MongoshIOProvider {
     markTime(TimingCategories.REPLInstantiation, 'initialized mongosh repl');
     this.injectReplFunctions();
 
-    const commandLineLoadFiles = this.cliOptions.fileNames ?? [];
-    const evalScripts = this.cliOptions.eval ?? [];
-    const willExecuteCommandLineScripts =
-      commandLineLoadFiles.length > 0 || evalScripts.length > 0;
-    const willEnterInteractiveMode =
-      !willExecuteCommandLineScripts || !!this.cliOptions.shell;
+    const {
+      commandLineLoadFiles,
+      evalScripts,
+      willEnterInteractiveMode,
+      willExecuteCommandLineScripts,
+    } = CliRepl.getFileAndEvalInfo(this.cliOptions);
 
     if (
       (evalScripts.length === 0 ||
@@ -397,6 +435,7 @@ export class CliRepl implements MongoshIOProvider {
         installdir: this.shellHomeDirectory.roamingPath('snippets'),
         instanceState: this.mongoshRepl.runtimeState().instanceState,
         skipInitialIndexLoad: !willEnterInteractiveMode,
+        proxyOptions: this.agent,
       });
     }
 
@@ -416,6 +455,7 @@ export class CliRepl implements MongoshIOProvider {
 
       this.bus.emit('mongosh:start-session', {
         isInteractive: false,
+        jsContext: this.mongoshRepl.jsContext(),
         timings: summariseTimingData(getTimingData()),
       });
 
@@ -474,8 +514,33 @@ export class CliRepl implements MongoshIOProvider {
     await this.mongoshRepl.startRepl(initialized);
     this.bus.emit('mongosh:start-session', {
       isInteractive: true,
+      jsContext: this.mongoshRepl.jsContext(),
       timings: summariseTimingData(getTimingData()),
     });
+  }
+
+  private static getFileAndEvalInfo(cliOptions: CliOptions): {
+    commandLineLoadFiles: string[];
+    evalScripts: string[];
+    willExecuteCommandLineScripts: boolean;
+    willEnterInteractiveMode: boolean;
+    quiet: boolean;
+  } {
+    const commandLineLoadFiles = cliOptions.fileNames ?? [];
+    const evalScripts = cliOptions.eval ?? [];
+    const willExecuteCommandLineScripts =
+      commandLineLoadFiles.length > 0 || evalScripts.length > 0;
+    const willEnterInteractiveMode =
+      !willExecuteCommandLineScripts || !!cliOptions.shell;
+    const quiet =
+      cliOptions.quiet ?? !(cliOptions.verbose ?? willEnterInteractiveMode);
+    return {
+      commandLineLoadFiles,
+      evalScripts,
+      willEnterInteractiveMode,
+      willExecuteCommandLineScripts,
+      quiet,
+    };
   }
 
   injectReplFunctions(): void {
@@ -484,7 +549,7 @@ export class CliRepl implements MongoshIOProvider {
         return await buildInfo();
       },
     } as const;
-    const { context } = this.mongoshRepl.runtimeState().repl;
+    const { context } = this.mongoshRepl.runtimeState();
     for (const [name, impl] of Object.entries(functions)) {
       context[name] = (...args: Parameters<typeof impl>) => {
         return Object.assign(impl(...args), {
@@ -510,17 +575,13 @@ export class CliRepl implements MongoshIOProvider {
     }
     // 'http' is not supported in startup snapshots yet.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Analytics = require('analytics-node');
-    this.segmentAnalytics = new Analytics(
-      apiKey,
-      {
-        ...this.analyticsOptions,
-        axiosConfig: {
-          timeout: 1000,
-        },
-        axiosRetryConfig: { retries: 0 },
-      } as any /* axiosConfig and axiosRetryConfig are existing options, but don't have type definitions */
-    );
+    const { Analytics } = require('@segment/analytics-node');
+    this.segmentAnalytics = new Analytics({
+      writeKey: apiKey,
+      maxRetries: 0,
+      httpRequestTimeout: 1000,
+      ...this.analyticsOptions,
+    });
     this.toggleableAnalytics = new ToggleableAnalytics(
       new SampledAnalytics({
         target: new ThrottledAnalytics({
@@ -607,8 +668,9 @@ export class CliRepl implements MongoshIOProvider {
 
     markTime(TimingCategories.Eval, 'wrote eval output');
     markTime(TimingCategories.EvalFile, 'start loading external files');
+    const { quiet } = CliRepl.getFileAndEvalInfo(this.cliOptions);
     for (const file of files) {
-      if (!this.cliOptions.quiet) {
+      if (!quiet) {
         this.output.write(
           `Loading file: ${this.clr(file, 'mongosh:filename')}\n`
         );
@@ -705,7 +767,7 @@ export class CliRepl implements MongoshIOProvider {
     try {
       let config: CliUserConfig;
       if (fileContents.trim().startsWith('{')) {
-        config = bson.EJSON.parse(fileContents) as any;
+        config = bson.EJSON.parse(fileContents);
       } else {
         config = (yaml.load(fileContents) as any)?.mongosh ?? {};
       }
@@ -760,7 +822,8 @@ export class CliRepl implements MongoshIOProvider {
     driverUri: string,
     driverOptions: DevtoolsConnectOptions
   ): Promise<CliServiceProvider> {
-    if (!this.cliOptions.nodb && !this.cliOptions.quiet) {
+    const { quiet } = CliRepl.getFileAndEvalInfo(this.cliOptions);
+    if (!this.cliOptions.nodb && !quiet) {
       this.output.write(
         i18n.__(CONNECTING) +
           '\t\t' +
@@ -809,6 +872,11 @@ export class CliRepl implements MongoshIOProvider {
     }
     this.config[key] = value;
     if (key === 'enableTelemetry') {
+      if (this.forceDisableTelemetry) {
+        throw new MongoshRuntimeError(
+          "Cannot modify telemetry settings while 'forceDisableTelemetry' is set to true"
+        );
+      }
       this.setTelemetryEnabled(this.config.enableTelemetry);
       this.bus.emit('mongosh:update-user', {
         userId: this.config.userId,
@@ -856,23 +924,16 @@ export class CliRepl implements MongoshIOProvider {
     }
   }
 
+  // Factored out for testing
+  getGlibcVersion = getGlibcVersion;
+
   verifyPlatformSupport(): void {
-    if (this.cliOptions.quiet) {
+    const { quiet } = CliRepl.getFileAndEvalInfo(this.cliOptions);
+    if (quiet) {
       return;
     }
 
-    // Typings for process.getReport haven't been updated
-    // (https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40140)
-    const processReport = process.report?.getReport() as unknown as
-      | {
-          header: {
-            glibcVersionRuntime?: string;
-          };
-        }
-      | undefined;
-    if (!processReport) {
-      return;
-    }
+    const glibcVersion = this.getGlibcVersion();
 
     const warnings: string[] = [];
     const RECOMMENDED_GLIBC = '>=2.28.0';
@@ -894,8 +955,8 @@ export class CliRepl implements MongoshIOProvider {
     const satisfiesGLIBCRequirement = (glibcVersion: string) =>
       semverRangeCheck(glibcVersion, RECOMMENDED_GLIBC);
     if (
-      processReport.header.glibcVersionRuntime !== undefined &&
-      !satisfiesGLIBCRequirement(processReport.header.glibcVersionRuntime)
+      glibcVersion !== undefined &&
+      !satisfiesGLIBCRequirement(glibcVersion)
     ) {
       warnings.push(
         '  - Using mongosh on the current operating system is deprecated, and support may be removed in a future release.'
@@ -966,22 +1027,19 @@ export class CliRepl implements MongoshIOProvider {
 
   /**
    * Require the user to enter a password.
-   *
-   * @param {string} driverUrl - The driver URI.
-   * @param {DevtoolsConnectOptions} driverOptions - The driver options.
    */
   async requirePassword(): Promise<string> {
     const passwordPromise = askpassword({
       input: this.input,
-      output: this.output,
+      output: this.promptOutput,
       replacementCharacter: '*',
     });
-    this.output.write('Enter password: ');
+    this.promptOutput.write('Enter password: ');
     try {
       try {
         return (await passwordPromise).toString();
       } finally {
-        this.output.write('\n');
+        this.promptOutput.write('\n');
       }
     } catch (error: any) {
       await this._fatalError(error);
@@ -1004,6 +1062,7 @@ export class CliRepl implements MongoshIOProvider {
     if (this.closing) {
       return;
     }
+    this.agent?.destroy();
     if (!this.output.destroyed) {
       // Wait for output to be fully flushed before exiting.
       if (this.output.writableEnded) {
@@ -1028,7 +1087,7 @@ export class CliRepl implements MongoshIOProvider {
     if (analytics) {
       const flushStart = Date.now();
       try {
-        await promisify(analytics.flush.bind(analytics))();
+        await analytics.flush();
         markTime(TimingCategories.Telemetry, 'flushed analytics');
       } catch (err: any) {
         flushError = err.message;
@@ -1109,6 +1168,7 @@ export class CliRepl implements MongoshIOProvider {
 
   /** Adjust `driverOptionsIn` with OIDC-specific settings from this CLI instance. */
   async prepareOIDCOptions(
+    driverUri: string,
     driverOptionsIn: Readonly<DevtoolsConnectOptions>
   ): Promise<DevtoolsConnectOptions> {
     const driverOptions = {
@@ -1131,6 +1191,8 @@ export class CliRepl implements MongoshIOProvider {
           )}\nWaiting...\n`
       );
     };
+    driverOptions.proxy ??= this.proxyOptions;
+    driverOptions.applyProxyToOIDC ??= true;
 
     const [redirectURI, trustedEndpoints, browser] = await Promise.all([
       this.getConfig('oidcRedirectURI'),
@@ -1154,11 +1216,13 @@ export class CliRepl implements MongoshIOProvider {
   }
 
   async fetchMongoshUpdateUrl() {
+    const { quiet } = CliRepl.getFileAndEvalInfo(this.cliOptions);
     if (
-      this.cliOptions.quiet ||
-      process.env.CI ||
-      process.env.IS_CI ||
-      this.isContainerizedEnvironment
+      quiet ||
+      (!this.fetchMongoshUpdateUrlRegardlessOfCiEnvironment &&
+        (process.env.CI ||
+          process.env.IS_CI ||
+          this.isContainerizedEnvironment))
     ) {
       // No point in telling users about new versions if we are in
       // a CI or Docker-like environment. or the user has explicitly
@@ -1191,12 +1255,108 @@ export class CliRepl implements MongoshIOProvider {
     }
   }
 
-  async getMoreRecentMongoshVersion() {
+  async getMoreRecentMongoshVersion(): Promise<string | null> {
     const { version } = require('../package.json');
     return await this.updateNotificationManager.getLatestVersionIfMoreRecent(
       process.env
         .MONGOSH_ASSUME_DIFFERENT_VERSION_FOR_UPDATE_NOTIFICATION_TEST ||
         version
     );
+  }
+
+  private setupOIDCTokenDumpListener() {
+    function tryParseJWT(
+      token: string | null | undefined,
+      redact: 'redact' | 'include-secrets'
+    ): unknown {
+      if (!token) return token;
+      const jwtParts = token.split('.');
+      if (
+        // If this is a three-part token consisting of valid base64url-encoded
+        // parts (without trailing `=`), assume that it is a JWT access/id token.
+        jwtParts.length === 3 &&
+        jwtParts.every(
+          (part) =>
+            Buffer.from(part, 'base64url')
+              .toString('base64url')
+              .replace(/=+$/, '') === part.replace(/=+$/, '')
+        )
+      ) {
+        const [header, payload] = jwtParts.map((part) => {
+          try {
+            return JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+          } catch {
+            // Not a valid JWT in this case.
+          }
+        });
+        if (redact === 'include-secrets') {
+          return { header, payload, signature: jwtParts[2] };
+        }
+        if (header && payload) {
+          return { header, payload };
+        }
+      }
+      return redact === 'include-secrets' ? token : '<non-JWT token>';
+    }
+
+    let lastServerIdPInfo: IdPInfo | undefined;
+    const { oidcDumpTokens } = this.cliOptions;
+    if (oidcDumpTokens) {
+      this.bus.on(
+        'mongodb-oidc-plugin:received-server-params',
+        ({ params: { idpInfo } }) => {
+          lastServerIdPInfo = idpInfo;
+        }
+      );
+      this.bus.on(
+        'mongodb-oidc-plugin:auth-succeeded',
+        ({
+          tokenType,
+          refreshToken, // only an identifier, not the actual token
+          expiresAt,
+          passIdTokenAsAccessToken,
+          tokens: { accessToken: at, refreshToken: rt, idToken: idt },
+        }) => {
+          const printable = {
+            lastServerIdPInfo: lastServerIdPInfo && {
+              issuer: lastServerIdPInfo?.issuer,
+              clientId: lastServerIdPInfo?.clientId,
+              requestScopes: lastServerIdPInfo?.requestScopes,
+            },
+            tokenType,
+            refreshToken,
+            expiresAt,
+            passIdTokenAsAccessToken,
+            tokens:
+              oidcDumpTokens === 'include-secrets'
+                ? {
+                    accessToken: tryParseJWT(at, 'include-secrets'),
+                    refreshToken: tryParseJWT(rt, 'include-secrets'),
+                    idToken: tryParseJWT(idt, 'include-secrets'),
+                  }
+                : {
+                    accessToken: tryParseJWT(at, 'redact'),
+                    idToken: tryParseJWT(idt, 'redact'),
+                  },
+          };
+
+          this.output.write(
+            '\n' +
+              this.clr(
+                '----- BEGIN OIDC TOKEN DUMP -----',
+                'mongosh:section-header'
+              ) +
+              '\n' +
+              JSON.stringify(printable, null, 2) +
+              '\n' +
+              this.clr(
+                '----- END OIDC TOKEN DUMP -----',
+                'mongosh:section-header'
+              ) +
+              '\n'
+          );
+        }
+      );
+    }
   }
 }

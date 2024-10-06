@@ -24,6 +24,7 @@ import {
   shouldRunAggregationImmediately,
   adjustRunCommand,
   getBadge,
+  aggregateBackgroundOptionNotSupportedHelp,
 } from './helpers';
 
 import {
@@ -184,10 +185,14 @@ export default class Database extends ShellApiWithMongoClass {
     cmd: Document,
     options: CommandOperationOptions = {}
   ): Promise<Document> {
-    return this.getSiblingDB('admin')._runCommand(cmd, {
-      ...(await this._baseOptions()),
-      ...options,
-    });
+    return this.getSiblingDB('admin')._runCommand(cmd, options);
+  }
+
+  public async _runAdminReadCommand(
+    cmd: Document,
+    options: CommandOperationOptions = {}
+  ): Promise<Document> {
+    return this.getSiblingDB('admin')._runReadCommand(cmd, options);
   }
 
   public async _runCursorCommand(
@@ -275,7 +280,7 @@ export default class Database extends ShellApiWithMongoClass {
         // are not going to differ from fresh ones, and even if they do, a
         // subsequent autocompletion request will almost certainly have at least
         // the new cached results.
-        await new Promise((resolve) => setTimeout(resolve, 200).unref());
+        await new Promise((resolve) => setTimeout(resolve, 200)?.unref?.());
         return this._cachedCollectionNames;
       })(),
     ]);
@@ -365,11 +370,19 @@ export default class Database extends ShellApiWithMongoClass {
       cmd = { [cmd]: 1 };
     }
 
-    const hiddenCommands = new RegExp(HIDDEN_COMMANDS);
-    if (!Object.keys(cmd).some((k) => hiddenCommands.test(k))) {
-      this._emitDatabaseApiCall('runCommand', { cmd, options });
+    try {
+      const hiddenCommands = new RegExp(HIDDEN_COMMANDS);
+      if (!Object.keys(cmd).some((k) => hiddenCommands.test(k))) {
+        this._emitDatabaseApiCall('runCommand', { cmd, options });
+      }
+      return await this._runCommand(cmd, options);
+    } catch (error: any) {
+      if (error.codeName === 'NotPrimaryNoSecondaryOk') {
+        const message = `not primary - consider passing the readPreference option e.g. db.runCommand({ command }, { readPreference: "secondaryPreferred" })`;
+        (error as Error).message = message;
+      }
+      throw error;
     }
-    return this._runCommand(cmd, options);
   }
 
   /**
@@ -413,6 +426,11 @@ export default class Database extends ShellApiWithMongoClass {
     pipeline: Document[],
     options?: Document
   ): Promise<AggregationCursor> {
+    if ('background' in (options ?? {})) {
+      await this._instanceState.printWarning(
+        aggregateBackgroundOptionNotSupportedHelp
+      );
+    }
     assertArgsDefinedType([pipeline], [true], 'Database.aggregate');
     this._emitDatabaseApiCall('aggregate', { options, pipeline });
 
@@ -1112,10 +1130,10 @@ export default class Database extends ShellApiWithMongoClass {
   }
 
   @returnsPromise
-  @apiVersions([]) // TODO: Update this after https://jira.mongodb.org/browse/PM-2327
+  @apiVersions([])
   async version(): Promise<string> {
     this._emitDatabaseApiCall('version', {});
-    const info: Document = await this._runAdminCommand({
+    const info: Document = await this._runAdminReadCommand({
       buildInfo: 1,
     });
     if (!info || info.version === undefined) {
@@ -1130,10 +1148,10 @@ export default class Database extends ShellApiWithMongoClass {
   }
 
   @returnsPromise
-  @apiVersions([]) // TODO: Maybe update this after https://jira.mongodb.org/browse/PM-2327
+  @apiVersions([])
   async serverBits(): Promise<Document> {
     this._emitDatabaseApiCall('serverBits', {});
-    const info: Document = await this._runAdminCommand({
+    const info: Document = await this._runAdminReadCommand({
       buildInfo: 1,
     });
     if (!info || info.bits === undefined) {
@@ -1183,7 +1201,7 @@ export default class Database extends ShellApiWithMongoClass {
   @apiVersions([])
   async serverBuildInfo(): Promise<Document> {
     this._emitDatabaseApiCall('serverBuildInfo', {});
-    return await this._runAdminCommand({
+    return await this._runAdminReadCommand({
       buildInfo: 1,
     });
   }
@@ -1192,7 +1210,7 @@ export default class Database extends ShellApiWithMongoClass {
   @apiVersions([])
   async serverStatus(opts = {}): Promise<Document> {
     this._emitDatabaseApiCall('serverStatus', { options: opts });
-    return await this._runAdminCommand({
+    return await this._runAdminReadCommand({
       serverStatus: 1,
       ...opts,
     });
@@ -1221,7 +1239,7 @@ export default class Database extends ShellApiWithMongoClass {
   @apiVersions([])
   async hostInfo(): Promise<Document> {
     this._emitDatabaseApiCall('hostInfo', {});
-    return await this._runAdminCommand({
+    return await this._runAdminReadCommand({
       hostInfo: 1,
     });
   }
@@ -1230,7 +1248,7 @@ export default class Database extends ShellApiWithMongoClass {
   @apiVersions([])
   async serverCmdLineOpts(): Promise<Document> {
     this._emitDatabaseApiCall('serverCmdLineOpts', {});
-    return await this._runAdminCommand({
+    return await this._runAdminReadCommand({
       getCmdLineOpts: 1,
     });
   }
@@ -1339,7 +1357,7 @@ export default class Database extends ShellApiWithMongoClass {
     this._emitDatabaseApiCall('getLogComponents', {});
     const cmdObj = { getParameter: 1, logComponentVerbosity: 1 };
 
-    const result = await this._runAdminCommand(cmdObj);
+    const result = await this._runAdminReadCommand(cmdObj);
     if (!result || result.logComponentVerbosity === undefined) {
       throw new MongoshRuntimeError(
         `Error running command  ${result ? result.errmsg || '' : ''}`,
@@ -1479,7 +1497,7 @@ export default class Database extends ShellApiWithMongoClass {
     if (
       (await local.getCollection('system.replset').countDocuments({})) !== 0
     ) {
-      const status = await this._runAdminCommand({ replSetGetStatus: 1 });
+      const status = await this._runAdminReadCommand({ replSetGetStatus: 1 });
       // get primary
       let primary = null;
       for (const member of status.members) {

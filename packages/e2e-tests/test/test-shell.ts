@@ -1,11 +1,17 @@
-import type Mocha from 'mocha';
 import assert from 'assert';
-import type { ChildProcess } from 'child_process';
+import type {
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+} from 'child_process';
 import { spawn } from 'child_process';
 import { once } from 'events';
+import { inspect } from 'util';
 import path from 'path';
 import stripAnsi from 'strip-ansi';
+import { EJSON } from 'bson';
 import { eventually } from '../../../testing/eventually';
+
+/* eslint-disable mocha/no-exports -- This file export hooks wrapping Mocha's Hooks APIs */
 
 export type TestShellStartupResult =
   | { state: 'prompt' }
@@ -20,23 +26,37 @@ const PROMPT_PATTERN = /^([^<>]*> ?)+$/m;
 const ERROR_PATTERN_1 = /Thrown:\n([^>]*)/gm; // node <= 12.14
 const ERROR_PATTERN_2 = /Uncaught[:\n ]+([^>]*)/gm;
 
+function matches(str: string, pattern: string | RegExp): boolean {
+  return typeof pattern === 'string'
+    ? str.includes(pattern)
+    : pattern.test(str);
+}
+
+export interface TestShellOptions {
+  args: string[];
+  env?: Record<string, string>;
+  removeSigintListeners?: boolean;
+  cwd?: string;
+  forceTerminal?: boolean;
+  consumeStdio?: boolean;
+}
+
 /**
  * Test shell helper class.
  */
 export class TestShell {
-  private static _openShells: TestShell[] = [];
+  private static _openShells: Set<TestShell> = new Set();
 
-  static start(
-    options: {
-      args: string[];
-      env?: Record<string, string>;
-      removeSigintListeners?: boolean;
-      cwd?: string;
-      forceTerminal?: boolean;
-      consumeStdio?: boolean;
-    } = { args: [] }
-  ): TestShell {
-    let shellProcess: ChildProcess;
+  /**
+   * Starts a test shell.
+   *
+   * Beware that the caller is responsible for calling {@link kill} (and potentially {@link waitForExit}).
+   *
+   * Consider calling the `startTestShell` function on a {@link Mocha.Context} instead, as that manages the lifetime the shell
+   * and ensures it gets killed eventually.
+   */
+  static start(options: TestShellOptions = { args: [] }): TestShell {
+    let shellProcess: ChildProcessWithoutNullStreams;
 
     let env = options.env || process.env;
     if (options.forceTerminal) {
@@ -80,43 +100,55 @@ export class TestShell {
     }
 
     const shell = new TestShell(shellProcess, options.consumeStdio);
-    TestShell._openShells.push(shell);
+    TestShell._openShells.add(shell);
+    void shell.waitForExit().then(() => {
+      TestShell._openShells.delete(shell);
+    });
 
     return shell;
   }
 
-  static async killall(): Promise<void> {
-    const exitPromises: Promise<unknown>[] = [];
-    while (TestShell._openShells.length) {
-      const shell = TestShell._openShells.pop();
-      shell.kill();
-      exitPromises.push(shell.waitForExit());
-    }
-    await Promise.all(exitPromises);
+  debugInformation() {
+    return {
+      pid: this.process.pid,
+      output: this.output,
+      rawOutput: this.rawOutput,
+      exitCode: this.process.exitCode,
+      signal: this.process.signalCode,
+    };
   }
 
-  static async cleanup(this: Mocha.Context): Promise<void> {
-    if (this.currentTest?.state === 'failed') {
-      for (const shell of TestShell._openShells) {
-        console.error({
-          pid: shell.process.pid,
-          output: shell.output,
-          rawOutput: shell.rawOutput,
-          exitCode: shell.process.exitCode,
-          signal: shell.process.signalCode,
-        });
-      }
+  static printShells() {
+    for (const shell of TestShell._openShells) {
+      console.error(shell.debugInformation());
     }
-    await TestShell.killall();
   }
 
-  private _process: ChildProcess;
+  static assertNoOpenShells() {
+    const debugInformation = [...TestShell._openShells].map((shell) =>
+      shell.debugInformation()
+    );
+    assert.strictEqual(
+      TestShell._openShells.size,
+      0,
+      `Expected no open shells, found: ${JSON.stringify(
+        debugInformation,
+        null,
+        2
+      )}`
+    );
+  }
+
+  private _process: ChildProcessWithoutNullStreams;
 
   private _output: string;
   private _rawOutput: string;
   private _onClose: Promise<number>;
 
-  constructor(shellProcess: ChildProcess, consumeStdio = true) {
+  constructor(
+    shellProcess: ChildProcessWithoutNullStreams,
+    consumeStdio = true
+  ) {
     this._process = shellProcess;
     this._output = '';
     this._rawOutput = '';
@@ -147,7 +179,7 @@ export class TestShell {
     return this._rawOutput;
   }
 
-  get process(): ChildProcess {
+  get process(): ChildProcessWithoutNullStreams {
     return this._process;
   }
 
@@ -191,6 +223,15 @@ export class TestShell {
     return this._onClose;
   }
 
+  /**
+   * Waits for the shell to exit, asserts no errors and returns the output.
+   */
+  async waitForCleanOutput(): Promise<string> {
+    await this.waitForExit();
+    this.assertNoErrors();
+    return this.output;
+  }
+
   async waitForPromptOrExit(): Promise<TestShellStartupResult> {
     return Promise.race([
       this.waitForPrompt().then(() => ({ state: 'prompt' } as const)),
@@ -202,8 +243,9 @@ export class TestShell {
     this._process.kill(signal);
   }
 
-  writeInput(chars: string): void {
+  writeInput(chars: string, { end = false } = {}): void {
     this._process.stdin.write(chars);
+    if (end) this._process.stdin.end();
   }
 
   writeInputLine(chars: string): void {
@@ -215,6 +257,16 @@ export class TestShell {
     this.writeInputLine(line);
     await this.waitForPrompt(previousOutputLength);
     return this._output.slice(previousOutputLength);
+  }
+
+  async executeLineWithJSONResult(line: string): Promise<any> {
+    const output = await this.executeLine(
+      `">>>>>>" + EJSON.stringify(${line}, {relaxed:false}) + "<<<<<<"`
+    );
+    const matching = output.match(/>>>>>>(.+)<<<<<</)?.[1];
+    if (!matching)
+      throw new Error(`Could not parse output from line: '${output}'`);
+    return EJSON.parse(matching);
   }
 
   assertNoErrors(): void {
@@ -229,38 +281,34 @@ export class TestShell {
     }
   }
 
-  assertContainsOutput(expectedOutput: string): void {
+  assertContainsOutput(expectedOutput: string | RegExp): void {
     const onlyOutputLines = this._getOutputLines();
-    if (!onlyOutputLines.join('\n').includes(expectedOutput)) {
+    if (!matches(onlyOutputLines.join('\n'), expectedOutput)) {
       throw new assert.AssertionError({
-        message: `Expected shell output to include ${JSON.stringify(
-          expectedOutput
-        )}`,
+        message: `Expected shell output to include ${inspect(expectedOutput)}`,
         actual: this._output,
         expected: expectedOutput,
       });
     }
   }
 
-  assertContainsError(expectedError: string): void {
+  assertContainsError(expectedError: string | RegExp): void {
     const allErrors = this._getAllErrors();
 
-    if (!allErrors.find((error) => error.includes(expectedError))) {
+    if (!allErrors.find((error) => matches(error, expectedError))) {
       throw new assert.AssertionError({
-        message: `Expected shell errors to include ${JSON.stringify(
-          expectedError
-        )}`,
+        message: `Expected shell errors to include ${inspect(expectedError)}`,
         actual: this._output,
         expected: expectedError,
       });
     }
   }
 
-  assertNotContainsOutput(unexpectedOutput: string): void {
+  assertNotContainsOutput(unexpectedOutput: string | RegExp): void {
     const onlyOutputLines = this._getOutputLines();
-    if (onlyOutputLines.join('\n').includes(unexpectedOutput)) {
+    if (matches(onlyOutputLines.join('\n'), unexpectedOutput)) {
       throw new assert.AssertionError({
-        message: `Expected shell output not  to include ${JSON.stringify(
+        message: `Expected shell output not  to include ${inspect(
           unexpectedOutput
         )}`,
         actual: this._output,
@@ -288,6 +336,6 @@ export class TestShell {
     if (!match) {
       return null;
     }
-    return match.groups.logId;
+    return match.groups!.logId;
   }
 }

@@ -43,23 +43,28 @@ export interface ShowEvent {
 }
 
 export interface ConnectEvent {
-  is_atlas: boolean;
-  is_localhost: boolean;
-  is_do: boolean;
-  server_version: string;
+  is_atlas?: boolean;
+  resolved_hostname?: string;
+  is_localhost?: boolean;
+  is_do_url?: boolean;
+  server_version?: string;
   server_os?: string;
   server_arch?: string;
-  is_enterprise: boolean;
+  is_enterprise?: boolean;
   auth_type?: string;
-  is_data_federation: boolean;
+  is_data_federation?: boolean;
+  is_stream?: boolean;
   dl_version?: string;
-  is_genuine: boolean;
-  non_genuine_server_name: string;
+  atlas_version?: string;
+  is_genuine?: boolean;
+  non_genuine_server_name?: string;
   api_version?: string;
   api_strict?: boolean;
   api_deprecation_errors?: boolean;
-  node_version: string;
-  uri: string;
+  node_version?: string;
+  uri?: string;
+  is_local_atlas?: boolean;
+  is_atlas_url?: boolean;
 }
 
 export interface ScriptLoadFileEvent {
@@ -176,6 +181,7 @@ export interface FetchingUpdateMetadataCompleteEvent {
 
 export interface SessionStartedEvent {
   isInteractive: boolean;
+  jsContext: string;
   timings: {
     [category: string]: number;
   };
@@ -567,12 +573,16 @@ export class CliUserConfigValidator extends SnippetShellUserConfigValidator {
 }
 
 export interface ConfigProvider<T> {
-  getConfig<K extends keyof T>(key: K): Promise<T[K] | undefined> | undefined;
+  getConfig<K extends keyof T>(
+    key: K
+  ): Promise<T[K] | undefined> | T[K] | undefined;
   setConfig<K extends keyof T>(
     key: K,
     value: T[K]
-  ): Promise<'success' | 'ignored'>;
-  resetConfig<K extends keyof T>(key: K): Promise<'success' | 'ignored'>;
+  ): Promise<'success' | 'ignored'> | 'success' | 'ignored';
+  resetConfig<K extends keyof T>(
+    key: K
+  ): Promise<'success' | 'ignored'> | 'success' | 'ignored';
   validateConfig<K extends keyof T>(
     key: K,
     value: T[K]

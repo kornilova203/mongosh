@@ -1,10 +1,9 @@
-import { promises as fs, constants as fsConstants } from 'fs';
+import { promises as fs } from 'fs';
 import path from 'path';
 import type { Config } from './config';
 import { ALL_PACKAGE_VARIANTS, getReleaseVersionFromTag } from './config';
 import { uploadArtifactToDownloadCenter as uploadArtifactToDownloadCenterFn } from './download-center';
 import { downloadArtifactFromEvergreen as downloadArtifactFromEvergreenFn } from './evergreen';
-import { notarizeArtifact as notarizeArtifactFn } from './packaging';
 import { generateChangelog as generateChangelogFn } from './git';
 import type { GithubRepo } from '@mongodb-js/devtools-github-repo';
 import { getPackageFile } from './packaging';
@@ -14,13 +13,10 @@ export async function runDraft(
   githubRepo: GithubRepo,
   uploadToDownloadCenter: typeof uploadArtifactToDownloadCenterFn = uploadArtifactToDownloadCenterFn,
   downloadArtifactFromEvergreen: typeof downloadArtifactFromEvergreenFn = downloadArtifactFromEvergreenFn,
-  ensureGithubReleaseExistsAndUpdateChangelog: typeof ensureGithubReleaseExistsAndUpdateChangelogFn = ensureGithubReleaseExistsAndUpdateChangelogFn,
-  notarizeArtifact: typeof notarizeArtifactFn = notarizeArtifactFn
+  ensureGithubReleaseExistsAndUpdateChangelog: typeof ensureGithubReleaseExistsAndUpdateChangelogFn = ensureGithubReleaseExistsAndUpdateChangelogFn
 ): Promise<void> {
-  if (
-    !config.triggeringGitTag ||
-    !getReleaseVersionFromTag(config.triggeringGitTag)
-  ) {
+  const { triggeringGitTag } = config;
+  if (!triggeringGitTag || !getReleaseVersionFromTag(triggeringGitTag)) {
     console.error(
       'mongosh: skipping draft as not triggered by a git tag that matches a draft/release tag'
     );
@@ -54,49 +50,39 @@ export async function runDraft(
       `mongosh: processing artifact for ${variant} - ${tarballFile.path}`
     );
 
-    const downloadedArtifact = await downloadArtifactFromEvergreen(
-      tarballFile.path,
-      config.project as string,
-      config.triggeringGitTag,
-      tmpDir
-    );
-
-    let signatureFile: string | undefined;
-    try {
-      await notarizeArtifact(downloadedArtifact, {
-        signingKeyName: config.notarySigningKeyName || '',
-        authToken: config.notaryAuthToken || '',
-        signingComment: 'Evergreen Automatic Signing (mongosh)',
-      });
-      signatureFile = downloadedArtifact + '.sig';
-      await fs.access(signatureFile, fsConstants.R_OK);
-    } catch (err: any) {
-      console.warn(
-        `Skipping expected signature file for ${downloadedArtifact}: ${err.message}`
-      );
-      signatureFile = undefined;
-    }
-
     await Promise.all(
-      [
-        [downloadedArtifact, tarballFile.contentType],
-        [signatureFile, 'application/pgp-signature'],
-      ].flatMap(([path, contentType]) =>
-        path
-          ? [
-              uploadToDownloadCenter(
-                path,
-                config.downloadCenterAwsKey as string,
-                config.downloadCenterAwsSecret as string
-              ),
+      (
+        [
+          [tarballFile.path, tarballFile.contentType, true],
+          [tarballFile.path + '.sig', 'application/pgp-signature', false],
+        ] as const
+      ).map(async ([filename, contentType, required]) => {
+        let downloadedArtifact;
+        try {
+          downloadedArtifact = await downloadArtifactFromEvergreen(
+            filename,
+            config.project as string,
+            triggeringGitTag,
+            tmpDir
+          );
+        } catch (err) {
+          if (required) throw err;
+          console.warn(`Skipping missing artifact file`, filename);
+          return;
+        }
+        await Promise.all([
+          uploadToDownloadCenter(
+            downloadedArtifact,
+            config.downloadCenterAwsKey as string,
+            config.downloadCenterAwsSecret as string
+          ),
 
-              githubRepo.uploadReleaseAsset(githubReleaseTag, {
-                path,
-                contentType,
-              }),
-            ]
-          : []
-      )
+          githubRepo.uploadReleaseAsset(githubReleaseTag, {
+            path: downloadedArtifact,
+            contentType,
+          }),
+        ]);
+      })
     );
   }
 }

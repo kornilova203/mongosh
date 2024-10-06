@@ -5,6 +5,7 @@ import rimraf from 'rimraf';
 import chai from 'chai';
 import sinonChai from 'sinon-chai';
 import chaiAsPromised from 'chai-as-promised';
+import type { MongodSetup } from '../../../testing/integration-testing-hooks';
 
 chai.use(sinonChai);
 chai.use(chaiAsPromised);
@@ -129,10 +130,40 @@ const setTemporaryHomeDirectory = () => {
   return { homedir, env };
 };
 
+function getCertPath(filename: string): string {
+  return path.join(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    'testing',
+    'certificates',
+    filename
+  );
+}
+
+// TLS requires matching hostnames, so here we need to explicitly
+// specify `localhost` + IPv4 instead of `127.0.0.1`
+async function connectionStringWithLocalhost(
+  setup: MongodSetup,
+  searchParams: Record<string, string> = {}
+): Promise<string> {
+  const cs = await setup.connectionStringUrl();
+  cs.hosts = cs.hosts.map((host) =>
+    host.replace(/^(127.0.0.1)(?=$|:)/, 'localhost')
+  );
+  cs.searchParams.set('family', '4');
+  for (const [key, value] of Object.entries(searchParams))
+    cs.searchParams.set(key, value);
+  return cs.toString();
+}
+
 // eslint-disable-next-line mocha/no-exports
 export {
   useTmpdir,
   readReplLogfile,
   fakeExternalEditor,
   setTemporaryHomeDirectory,
+  getCertPath,
+  connectionStringWithLocalhost,
 };

@@ -9,6 +9,7 @@ import {
   ALL_SERVER_VERSIONS,
   ALL_TOPOLOGIES,
 } from './enums';
+import type { Collection } from './index';
 import { signatures, toShellResult } from './index';
 import Mongo from './mongo';
 import type {
@@ -16,6 +17,7 @@ import type {
   FindCursor as ServiceProviderCursor,
   AggregationCursor as ServiceProviderAggCursor,
   RunCommandCursor as ServiceProviderRunCommandCursor,
+  Document,
 } from '@mongosh/service-provider-core';
 import { bson } from '@mongosh/service-provider-core';
 import { EventEmitter } from 'events';
@@ -53,7 +55,7 @@ describe('Shard', function () {
       expect(signatures.Shard.type).to.equal('Shard');
     });
     it('attributes', function () {
-      expect(signatures.Shard.attributes.enableSharding).to.deep.equal({
+      expect(signatures.Shard.attributes?.enableSharding).to.deep.equal({
         type: 'function',
         returnsPromise: true,
         deprecated: false,
@@ -866,7 +868,10 @@ describe('Shard', function () {
       });
 
       it('prints a deprecation warning for mongodb >= 6.0.3', async function () {
-        instanceState.connectionInfo.buildInfo.version = '6.0.3-alpha0';
+        serviceProvider.getConnectionInfo.resolves({
+          extraInfo: { uri: '' },
+          buildInfo: { version: '6.0.3-alpha0' },
+        });
         serviceProvider.runCommandWithCheck.resolves({ ok: 1 });
         serviceProvider.updateOne.resolves({ acknowledged: 1 } as any);
         await shard.enableAutoSplit();
@@ -943,7 +948,10 @@ describe('Shard', function () {
       });
 
       it('prints a deprecation warning for mongodb >= 6.0.3', async function () {
-        instanceState.connectionInfo.buildInfo.version = '6.0.3-alpha0';
+        serviceProvider.getConnectionInfo.resolves({
+          extraInfo: { uri: '' },
+          buildInfo: { version: '6.0.3-alpha0' },
+        });
         serviceProvider.runCommandWithCheck.resolves({ ok: 1 });
         serviceProvider.updateOne.resolves({ acknowledged: 1 } as any);
         await shard.disableAutoSplit();
@@ -1782,6 +1790,199 @@ describe('Shard', function () {
         );
       });
     });
+
+    describe('shardAndDistributeCollection', function () {
+      it('calls shardCollection and then reshardCollection with correct parameters', async function () {
+        const expectedResult = { ok: 1 };
+
+        const shardCollectionStub = sinon
+          .stub(shard, 'shardCollection')
+          .resolves(expectedResult);
+        const reshardCollectionStub = sinon
+          .stub(shard, 'reshardCollection')
+          .resolves(expectedResult);
+
+        await shard.shardAndDistributeCollection(
+          'db.coll',
+          { key: 1 },
+          true,
+          {}
+        );
+
+        expect(shardCollectionStub.calledOnce).to.equal(true);
+        expect(shardCollectionStub.firstCall.args).to.deep.equal([
+          'db.coll',
+          {
+            key: 1,
+          },
+          true,
+          {},
+        ]);
+
+        expect(reshardCollectionStub.calledOnce).to.equal(true);
+        expect(reshardCollectionStub.firstCall.args).to.deep.equal([
+          'db.coll',
+          { key: 1 },
+          { numInitialChunks: 1000, forceRedistribution: true },
+        ]);
+      });
+
+      it('allows user to pass numInitialChunks', async function () {
+        const expectedResult = { ok: 1 };
+
+        const shardCollectionStub = sinon
+          .stub(shard, 'shardCollection')
+          .resolves(expectedResult);
+        const reshardCollectionStub = sinon
+          .stub(shard, 'reshardCollection')
+          .resolves(expectedResult);
+
+        await shard.shardAndDistributeCollection('db.coll', { key: 1 }, true, {
+          numInitialChunks: 1,
+        });
+
+        expect(shardCollectionStub.calledOnce).to.equal(true);
+        expect(shardCollectionStub.firstCall.args).to.deep.equal([
+          'db.coll',
+          {
+            key: 1,
+          },
+          true,
+          {
+            numInitialChunks: 1,
+          },
+        ]);
+
+        expect(reshardCollectionStub.calledOnce).to.equal(true);
+        expect(reshardCollectionStub.firstCall.args).to.deep.equal([
+          'db.coll',
+          { key: 1 },
+          { numInitialChunks: 1, forceRedistribution: true },
+        ]);
+      });
+      it('returns whatever shard.reshardCollection returns', async function () {
+        const expectedResult = { ok: 1 };
+        sinon.stub(shard, 'reshardCollection').resolves(expectedResult);
+        const result = await shard.shardAndDistributeCollection('db.coll', {
+          key: 1,
+        });
+        expect(result).to.deep.equal(expectedResult);
+      });
+    });
+
+    describe('moveCollection', function () {
+      it('calls serviceProvider.runCommandWithCheck', async function () {
+        await shard.moveCollection('db.coll', 'shard1');
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            moveCollection: 'db.coll',
+            toShard: 'shard1',
+          }
+        );
+      });
+
+      it('returns whatever serviceProvider.runCommandWithCheck returns', async function () {
+        const expectedResult = { ok: 1 };
+        serviceProvider.runCommandWithCheck.resolves(expectedResult);
+        const result = await shard.moveCollection('db.coll', 'shard1');
+        expect(result).to.deep.equal(expectedResult);
+      });
+
+      it('throws if serviceProvider.runCommandWithCheck rejects', async function () {
+        const expectedError = new Error();
+        serviceProvider.runCommandWithCheck.rejects(expectedError);
+        const caughtError = await shard
+          .moveCollection('db.coll', 'shard1')
+          .catch((e) => e);
+        expect(caughtError).to.equal(expectedError);
+      });
+    });
+
+    describe('abortMoveCollection', function () {
+      it('calls serviceProvider.runCommandWithCheck', async function () {
+        await shard.abortMoveCollection('db.coll');
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            abortMoveCollection: 'db.coll',
+          }
+        );
+      });
+
+      it('returns whatever serviceProvider.runCommandWithCheck returns', async function () {
+        const expectedResult = { ok: 1 };
+        serviceProvider.runCommandWithCheck.resolves(expectedResult);
+        const result = await shard.abortMoveCollection('db.coll');
+        expect(result).to.deep.equal(expectedResult);
+      });
+
+      it('throws if serviceProvider.runCommandWithCheck rejects', async function () {
+        const expectedError = new Error();
+        serviceProvider.runCommandWithCheck.rejects(expectedError);
+        const caughtError = await shard
+          .abortMoveCollection('db.coll')
+          .catch((e) => e);
+        expect(caughtError).to.equal(expectedError);
+      });
+    });
+
+    describe('unshardCollection', function () {
+      it('calls serviceProvider.runCommandWithCheck', async function () {
+        await shard.unshardCollection('db.coll', 'shard1');
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            unshardCollection: 'db.coll',
+            toShard: 'shard1',
+          }
+        );
+      });
+
+      it('returns whatever serviceProvider.runCommandWithCheck returns', async function () {
+        const expectedResult = { ok: 1 };
+        serviceProvider.runCommandWithCheck.resolves(expectedResult);
+        const result = await shard.unshardCollection('db.coll', 'shard1');
+        expect(result).to.deep.equal(expectedResult);
+      });
+
+      it('throws if serviceProvider.runCommandWithCheck rejects', async function () {
+        const expectedError = new Error();
+        serviceProvider.runCommandWithCheck.rejects(expectedError);
+        const caughtError = await shard
+          .unshardCollection('db.coll', 'shard1')
+          .catch((e) => e);
+        expect(caughtError).to.equal(expectedError);
+      });
+    });
+
+    describe('abortUnshardCollection', function () {
+      it('calls serviceProvider.runCommandWithCheck', async function () {
+        await shard.abortUnshardCollection('db.coll');
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            abortUnshardCollection: 'db.coll',
+          }
+        );
+      });
+
+      it('returns whatever serviceProvider.runCommandWithCheck returns', async function () {
+        const expectedResult = { ok: 1 };
+        serviceProvider.runCommandWithCheck.resolves(expectedResult);
+        const result = await shard.abortUnshardCollection('db.coll');
+        expect(result).to.deep.equal(expectedResult);
+      });
+
+      it('throws if serviceProvider.runCommandWithCheck rejects', async function () {
+        const expectedError = new Error();
+        serviceProvider.runCommandWithCheck.rejects(expectedError);
+        const caughtError = await shard
+          .abortUnshardCollection('db.coll')
+          .catch((e) => e);
+        expect(caughtError).to.equal(expectedError);
+      });
+    });
   });
 
   describe('integration', function () {
@@ -1835,6 +2036,7 @@ describe('Shard', function () {
         .toArray();
       expect(members.length).to.equal(2);
       await sh._database.getSiblingDB(dbName).dropDatabase();
+      await sh._database.getSiblingDB(dbName).createCollection('unsharded');
     });
 
     after(function () {
@@ -1859,7 +2061,7 @@ describe('Shard', function () {
       });
       context('with 5.0+ server', function () {
         skipIfServerVersion(mongos, '<= 4.4');
-        let apiStrictServiceProvider;
+        let apiStrictServiceProvider: ServiceProvider;
 
         before(async function () {
           try {
@@ -1901,19 +2103,25 @@ describe('Shard', function () {
     });
     describe('turn on sharding', function () {
       it('enableSharding for a db', async function () {
-        expect((await sh.status()).value.databases.length).to.equal(1);
-        expect((await sh.enableSharding(dbName)).ok).to.equal(1);
-        expect((await sh.status()).value.databases.length).to.equal(2);
+        expect((await sh.status()).value.databases.length).to.oneOf([1, 2]);
+        expect((await sh.enableSharding(dbName)).ok).to.equal(1); // This may not have any effect on newer server versions
+        expect((await sh.status()).value.databases.length).to.be.oneOf([1, 2]);
       });
       it('enableSharding for a collection and modify documents in it', async function () {
         expect(
-          Object.keys((await sh.status()).value.databases[1].collections).length
-        ).to.equal(0);
+          Object.keys(
+            (await sh.status()).value.databases.find(
+              (d: Document) => d.database._id === 'test'
+            )?.collections ?? []
+          )
+        ).to.deep.equal([]);
         expect(
           (await sh.shardCollection(ns, { key: 1 })).collectionsharded
         ).to.equal(ns);
         expect(
-          (await sh.status()).value.databases[1].collections[ns].shardKey
+          (await sh.status()).value.databases.find(
+            (d: Document) => d.database._id === 'test'
+          ).collections[ns].shardKey
         ).to.deep.equal({ key: 1 });
 
         const db = instanceState.currentDb.getSiblingDB(dbName);
@@ -2017,6 +2225,53 @@ describe('Shard', function () {
         );
         expect((await sh.status()).value.shards[0].tags).to.deep.equal([]);
       });
+      it('shows a full tag list when there are 20 or less tags', async function () {
+        const db = instanceState.currentDb.getSiblingDB(dbName);
+        for (let i = 0; i < 19; i++) {
+          await db.getCollection('coll').insertOne({ key: 'A', value: i * 10 });
+          await sh.addShardToZone(`${shardId}-0`, `zone${i}`);
+          await sh.updateZoneKeyRange(
+            ns,
+            { key: i * 10 },
+            { key: i * 10 + 10 },
+            `zone${i}`
+          );
+          await sh.addShardTag(`${shardId}-0`, `zone${i}`);
+        }
+
+        const tags = (await sh.status()).value.databases.find(
+          (d: Document) => d.database._id === 'test'
+        ).collections[ns].tags;
+        expect(tags.length).to.equal(19);
+      });
+      it('cuts a tag list when there are more than 20 tags', async function () {
+        await sh.addShardToZone(`${shardId}-0`, 'zone19');
+        await sh.updateZoneKeyRange(ns, { key: 190 }, { key: 200 }, 'zone19');
+        await sh.addShardTag(`${shardId}-0`, 'zone19');
+
+        const tags = (await sh.status()).value.databases.find(
+          (d: Document) => d.database._id === 'test'
+        ).collections[ns].tags;
+        expect(tags.length).to.equal(21);
+        expect(
+          tags.indexOf(
+            'too many tags to print, use verbose if you want to force print'
+          )
+        ).to.equal(20);
+
+        // Cleanup.
+        const db = instanceState.currentDb.getSiblingDB(dbName);
+        await db.getCollection('coll').deleteMany({});
+        for (let i = 0; i < 20; i++) {
+          await sh.removeRangeFromZone(
+            ns,
+            { key: i * 10 },
+            { key: i * 10 + 10 }
+          );
+          await sh.removeShardTag(`${shardId}-0`, `zone${i}`);
+          await sh.removeShardFromZone(`${shardId}-0`, `zone${i}`);
+        }
+      });
     });
     describe('balancer', function () {
       it('reports balancer state', async function () {
@@ -2050,7 +2305,7 @@ describe('Shard', function () {
               .getSiblingDB('config')
               .getCollection('collections')
               .findOne({ _id: ns })
-          ).noBalance
+          )?.noBalance
         ).to.equal(true);
       });
       it('enables balancing', async function () {
@@ -2061,7 +2316,7 @@ describe('Shard', function () {
               .getSiblingDB('config')
               .getCollection('collections')
               .findOne({ _id: ns })
-          ).noBalance
+          )?.noBalance
         ).to.equal(false);
       });
     });
@@ -2089,7 +2344,7 @@ describe('Shard', function () {
               .getSiblingDB('config')
               .getCollection('collections')
               .findOne({ _id: ns })
-          ).enableAutoMerge
+          )?.enableAutoMerge
         ).to.equal(false);
       });
       it('enables autoMerger', async function () {
@@ -2105,7 +2360,7 @@ describe('Shard', function () {
               .getSiblingDB('config')
               .getCollection('collections')
               .findOne({ _id: ns })
-          ).enableAutoMerge
+          )?.enableAutoMerge
         ).to.not.exist;
       });
     });
@@ -2122,6 +2377,7 @@ describe('Shard', function () {
       });
       it('fails when running against an unsharded collection', async function () {
         try {
+          await db.createCollection('test');
           await db.getCollection('test').getShardDistribution();
         } catch (err: any) {
           expect(err.name).to.equal('MongoshInvalidInputError');
@@ -2153,11 +2409,11 @@ describe('Shard', function () {
             '0B avg obj size on shard',
           ]);
 
-          const ValueShardInfoKeys = Object.keys(ret.value).filter((key) =>
-            key.startsWith('Shard')
+          const ValueShardInfoKeys = Object.keys(ret.value as Document).filter(
+            (key) => key.startsWith('Shard')
           );
           expect(ValueShardInfoKeys).to.have.lengthOf(1);
-          expect(ret.value[ValueShardInfoKeys[0]]).to.deep.equal({
+          expect((ret.value as Document)[ValueShardInfoKeys[0]]).to.deep.equal({
             data: '0B',
             docs: 0,
             chunks: 1,
@@ -2186,11 +2442,11 @@ describe('Shard', function () {
             `${Totals.data} avg obj size on shard`,
           ]);
 
-          const ValueShardInfoKeys = Object.keys(ret.value).filter((key) =>
-            key.startsWith('Shard')
+          const ValueShardInfoKeys = Object.keys(ret.value as Document).filter(
+            (key) => key.startsWith('Shard')
           );
           expect(ValueShardInfoKeys).to.have.lengthOf(1);
-          expect(ret.value[ValueShardInfoKeys[0]]).to.deep.equal({
+          expect((ret.value as Document)[ValueShardInfoKeys[0]]).to.deep.equal({
             data: Totals.data,
             docs: 1,
             chunks: 1,
@@ -2554,7 +2810,7 @@ describe('Shard', function () {
         const result = await sh.status();
 
         const databasesDbItem = result.value.databases.find(
-          (item) => item.database._id === 'db'
+          (item: Document) => item.database._id === 'db'
         );
         // Cannot get strict guarantees about the value of this field since SERVER-63983
         expect(databasesDbItem.database.partitioned).to.be.oneOf([
@@ -2562,7 +2818,7 @@ describe('Shard', function () {
           undefined,
         ]);
         const databasesDbShItem = result.value.databases.find(
-          (item) => item.database._id === 'dbSh'
+          (item: Document) => item.database._id === 'dbSh'
         );
         // Cannot get strict guarantees about the value of this field since SERVER-60926 and SERVER-63983
         expect(databasesDbShItem.database.partitioned).to.be.oneOf([
@@ -2572,11 +2828,10 @@ describe('Shard', function () {
         ]);
       });
     });
-
     describe('checkMetadataConsistency', function () {
       skipIfServerVersion(mongos, '< 7.0');
-      let db;
-      let coll;
+      let db: Database;
+      let coll: Collection;
 
       before(async function () {
         db = instanceState.currentDb.getSiblingDB('db');
@@ -2611,6 +2866,90 @@ describe('Shard', function () {
         const cursor = await coll.checkMetadataConsistency({ checkIndexes: 1 });
         expect(await cursor.toArray()).to.deep.equal([]);
       });
+    });
+  });
+
+  describe('integration chunks', function () {
+    let serviceProvider: CliServiceProvider;
+    let instanceState: ShellInstanceState;
+    let sh: Shard;
+    const dbName = 'test';
+    const ns = `${dbName}.coll`;
+    const shardId = 'rs-shard1';
+
+    const [mongos, rs0, rs1] = startTestCluster(
+      'shard',
+      // shards: 0 creates a setup without any initial shards
+      { topology: 'sharded', shards: 0 },
+      {
+        topology: 'replset',
+        args: ['--replSet', `${shardId}-0`, '--shardsvr'],
+      },
+      { topology: 'replset', args: ['--replSet', `${shardId}-1`, '--shardsvr'] }
+    );
+
+    before(async function () {
+      serviceProvider = await CliServiceProvider.connect(
+        await mongos.connectionString(),
+        dummyOptions,
+        {},
+        new EventEmitter()
+      );
+      instanceState = new ShellInstanceState(serviceProvider);
+      sh = new Shard(instanceState.currentDb);
+
+      // check replset uninitialized
+      let members = await (
+        await sh._database.getSiblingDB('config').getCollection('shards').find()
+      )
+        .sort({ _id: 1 })
+        .toArray();
+      expect(members.length).to.equal(0);
+
+      // add new shards
+      expect(
+        (await sh.addShard(`${shardId}-0/${await rs0.hostport()}`)).shardAdded
+      ).to.equal(`${shardId}-0`);
+      expect(
+        (await sh.addShard(`${shardId}-1/${await rs1.hostport()}`)).shardAdded
+      ).to.equal(`${shardId}-1`);
+      members = await (
+        await sh._database.getSiblingDB('config').getCollection('shards').find()
+      )
+        .sort({ _id: 1 })
+        .toArray();
+      expect(members.length).to.equal(2);
+      await sh._database.getSiblingDB(dbName).dropDatabase();
+      await sh._database.getSiblingDB(dbName).createCollection('unsharded');
+      await sh.enableSharding(dbName);
+      await sh.shardCollection(ns, { key: 1 });
+    });
+
+    after(function () {
+      return serviceProvider.close(true);
+    });
+
+    it('shows a full chunk list when there are 20 or less chunks', async function () {
+      for (let i = 0; i < 19; i++) {
+        await sh.splitAt(ns, { key: i + 1 });
+      }
+      const chunks = (await sh.status()).value.databases.find(
+        (d: Document) => d.database._id === 'test'
+      ).collections[ns].chunks;
+      expect(chunks.length).to.equal(20);
+    });
+
+    it('cuts a chunk list when there are more than 20 chunks', async function () {
+      await sh.splitAt(ns, { key: 20 });
+      const chunks = (await sh.status()).value.databases.find(
+        (d: Document) => d.database._id === 'test'
+      ).collections[ns].chunks;
+      expect(chunks.length).to.equal(21);
+      expect(
+        chunks.indexOf(
+          'too many chunks to print, use verbose if you want to force print'
+        )
+      ).to.equal(20);
     });
   });
 });

@@ -6,6 +6,9 @@ cd $(pwd)
 
 source .evergreen/setup-env.sh
 
+# make sure our .sbom files are freshly created
+rm -vrf .sbom && mkdir -vp .sbom
+
 if uname -a | grep -q 'Linux.*x86_64'; then
   rm -rf "tmp/.sccache"
   mkdir -p "tmp/.sccache"
@@ -35,10 +38,10 @@ elif uname -a | grep -q 'Darwin.*x86_64'; then
 elif [ -n "$MONGOSH_SHARED_OPENSSL" ]; then
   pushd /tmp/m
   if [ "$MONGOSH_SHARED_OPENSSL" == "openssl11" ]; then
-    curl -sSfLO https://www.openssl.org/source/openssl-1.1.1o.tar.gz
+    curl -sSfLO https://www.openssl.org/source/old/1.1.1/openssl-1.1.1o.tar.gz
     MONGOSH_OPENSSL_LIBNAME=:libcrypto.so.1.1,:libssl.so.1.1
   elif [ "$MONGOSH_SHARED_OPENSSL" == "openssl3" ]; then
-    curl -sSfLO https://www.openssl.org/source/openssl-3.0.5.tar.gz
+    curl -sSfLO https://www.openssl.org/source/old/3.0/openssl-3.0.5.tar.gz
     MONGOSH_OPENSSL_LIBNAME=:libcrypto.so.3,:libssl.so.3
   else
     echo "Unknown MONGOSH_SHARED_OPENSSL value: $MONGOSH_SHARED_OPENSSL"
@@ -92,6 +95,10 @@ if uname -a | grep -q 'Linux.*x86_64'; then
   test $(objdump -d dist/mongosh | grep '\bvmovd\b' | wc -l) -lt 1250
 fi
 
-tar cvzf dist.tgz dist
+npm run write-node-js-dep
+npm run create-purls-file
+cp .sbom/purls.txt dist/.purls.txt
 
-source .evergreen/compilation-context-expansions.sh
+cat dist/.purls.txt
+
+npm run create-dependency-sbom-lists

@@ -43,7 +43,7 @@ const loadCallNestingLevelSymbol = Symbol.for('@@mongosh.loadCallNestingLevel');
  * Class for representing the `config` object in mongosh.
  */
 @shellApiClassDefault
-class ShellConfig extends ShellApiClass {
+export class ShellConfig extends ShellApiClass {
   _instanceState: ShellInstanceState;
   defaults: Readonly<ShellUserConfig>;
 
@@ -80,6 +80,8 @@ class ShellConfig extends ShellApiClass {
     return `Setting "${key}" has been changed`;
   }
 
+  // @ts-expect-error TS does not understand that the return type templating
+  // always interacts well with the decorators
   @returnsPromise
   async get<K extends keyof ShellUserConfig>(
     key: K
@@ -330,24 +332,32 @@ export default class ShellApi extends ShellApiClass {
   @returnsPromise
   @platforms(['CLI'])
   async enableTelemetry(): Promise<any> {
-    const result = await this._instanceState.evaluationListener.setConfig?.(
-      'enableTelemetry',
-      true
-    );
-    if (result === 'success') {
-      return i18n.__('cli-repl.cli-repl.enabledTelemetry');
+    try {
+      const result = await this._instanceState.evaluationListener.setConfig?.(
+        'enableTelemetry',
+        true
+      );
+      if (result === 'success') {
+        return i18n.__('cli-repl.cli-repl.enabledTelemetry');
+      }
+    } catch (err: unknown) {
+      return String(err);
     }
   }
 
   @returnsPromise
   @platforms(['CLI'])
   async disableTelemetry(): Promise<any> {
-    const result = await this._instanceState.evaluationListener.setConfig?.(
-      'enableTelemetry',
-      false
-    );
-    if (result === 'success') {
-      return i18n.__('cli-repl.cli-repl.disabledTelemetry');
+    try {
+      const result = await this._instanceState.evaluationListener.setConfig?.(
+        'enableTelemetry',
+        false
+      );
+      if (result === 'success') {
+        return i18n.__('cli-repl.cli-repl.disabledTelemetry');
+      }
+    } catch (err: unknown) {
+      return String(err);
     }
   }
 

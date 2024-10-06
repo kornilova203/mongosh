@@ -22,6 +22,7 @@ import { baseBuildInfo, buildInfo } from './build-info';
 import { getStoragePaths, getGlobalConfigPaths } from './config-directory';
 import { getCryptLibraryPaths } from './crypt-library-paths';
 import { getTlsCertificateSelector } from './tls-certificate-selector';
+import { applyPacProxyS390XPatch } from './pac-proxy-s390x-patch';
 import { redactURICredentials } from '@mongosh/history';
 import { generateConnectionInfoFromCliArgs } from '@mongosh/arg-parser';
 import askcharacter from 'askcharacter';
@@ -30,6 +31,8 @@ import crypto from 'crypto';
 import net from 'net';
 import v8 from 'v8';
 import { TimingCategories } from '@mongosh/types';
+import './webpack-self-inspection';
+import { systemCA } from '@mongodb-js/devtools-proxy-support';
 
 // TS does not yet have type definitions for v8.startupSnapshot
 if ((v8 as any)?.startupSnapshot?.isBuildingSnapshot?.()) {
@@ -38,12 +41,18 @@ if ((v8 as any)?.startupSnapshot?.isBuildingSnapshot?.()) {
   require('@mongodb-js/saslprep'); // Driver dependency
   require('socks'); // Driver dependency
   require('emphasize'); // Dependency of pretty-repl
+  require('ipv6-normalize'); // Dependency of devtools-connect via os-dns-native
+  require('bindings'); // Used by various native dependencies but not a native dep itself
+  require('system-ca'); // Dependency of devtools-proxy-support
 
   {
     const console = require('console');
     const ConsoleCtor = console.Console;
     (v8 as any).startupSnapshot.addDeserializeCallback(() => {
       console.Console = ConsoleCtor;
+      // Work around Node.js caching the cwd when snapshotting
+      // https://github.com/nodejs/node/pull/51901
+      process.chdir('.');
     });
   }
 
@@ -128,26 +137,25 @@ async function main() {
       console.log(JSON.stringify(await buildInfo(), null, '  '));
       return;
     }
-    if (options.smokeTests) {
+    if (options.smokeTests || options.perfTests) {
       const smokeTestServer = process.env.MONGOSH_SMOKE_TEST_SERVER;
       const cryptLibraryOpts = options.cryptSharedLibPath
         ? [`--cryptSharedLibPath=${options.cryptSharedLibPath}`]
         : [];
       if (process.execPath === process.argv[1]) {
         // This is the compiled binary. Use only the path to it.
-        await runSmokeTests(
+        await runSmokeTests({
           smokeTestServer,
-          process.execPath,
-          ...cryptLibraryOpts
-        );
+          args: [process.execPath, ...cryptLibraryOpts],
+          wantPerformanceTesting: !!options.perfTests,
+        });
       } else {
         // This is not the compiled binary. Use node + this script.
-        await runSmokeTests(
+        await runSmokeTests({
           smokeTestServer,
-          process.execPath,
-          process.argv[1],
-          ...cryptLibraryOpts
-        );
+          args: [process.execPath, process.argv[1], ...cryptLibraryOpts],
+          wantPerformanceTesting: !!options.perfTests,
+        });
       }
       return;
     }
@@ -162,6 +170,8 @@ async function main() {
     if (process.env.CLEAR_SIGINT_LISTENERS) {
       process.removeAllListeners('SIGINT');
     }
+
+    applyPacProxyS390XPatch();
 
     // If we are spawned via Windows doubleclick, ask the user for an URI to
     // connect to. Allow an environment variable to override this for testing.
@@ -190,10 +200,15 @@ async function main() {
       }
     }
 
+    markTime(TimingCategories.Main, 'scheduling system-ca loading');
+    // asynchronously populate the system CA cache in devtools-proxy-support
+    systemCA().catch(() => undefined);
+    markTime(TimingCategories.Main, 'scheduled system-ca loading');
+
     const connectionInfo = generateConnectionInfoFromCliArgs(options);
     connectionInfo.driverOptions = {
       ...connectionInfo.driverOptions,
-      ...getTlsCertificateSelector(options.tlsCertificateSelector),
+      ...(await getTlsCertificateSelector(options.tlsCertificateSelector)),
       driverInfo: { name: 'mongosh', version },
     };
 
@@ -212,6 +227,10 @@ async function main() {
       getCryptLibraryPaths,
       input: process.stdin,
       output: process.stdout,
+      promptOutput:
+        process.env.TEST_USE_STDOUT_FOR_PASSWORD || process.stdout.isTTY
+          ? process.stdout
+          : process.stderr,
       // Node.js 20.0.0 made p.exit(undefined) behave as p.exit(0) rather than p.exit()
       onExit: (code?: number | undefined) =>
         code === undefined ? process.exit() : process.exit(code),
@@ -225,7 +244,10 @@ async function main() {
       ...connectionInfo.driverOptions,
     });
   } catch (e: any) {
-    console.error(`${e?.name}: ${e?.message}`);
+    // for debugging
+    if (process.env.MONGOSH_DISPLAY_STARTUP_STACK_TRACE)
+      console.error(e?.stack);
+    else console.error(`${e?.name}: ${e?.message}`);
     if (repl !== undefined) {
       repl.bus.emit('mongosh:error', e, 'startup');
     }

@@ -2,10 +2,17 @@ set -e
 set -x
 export BASEDIR="$PWD/.evergreen"
 
+if echo $NODE_JS_VERSION | grep -q ^16 ; then
+  NPM_VERSION=9.9.2 # 9.9.3 does not install well on Windows
+else
+  NPM_VERSION=10.x
+fi
+
 if [ "$OS" == "Windows_NT" ]; then
   powershell "$(cygpath -w "$BASEDIR")"/InstallNode.ps1
   . "$BASEDIR/setup-env.sh"
-  mkdir -p "$BASEDIR/npm-9" && (cd "$BASEDIR/npm-9" && echo '{}' > package.json && npm i npm@9.x)
+  mkdir -p "$BASEDIR/npm-10" && (cd "$BASEDIR/npm-10" && echo '{}' > package.json && npm i npm@$NPM_VERSION)
+  # using npm 10 because npm 9.9.3 does not install well on windows
 
   curl -sSfLO https://raw.githubusercontent.com/mongodb-js/compass/42e6142ae08be6fec944b80ff6289e6bcd11badf/.evergreen/node-gyp-bug-workaround.sh && bash node-gyp-bug-workaround.sh
 else
@@ -38,13 +45,20 @@ else
   # needs to be built from source
   if [[ "${DISTRO_ID}" =~ ^(amazon2-|rhel7|ubuntu18|suse12) ]] && [[ "$NODE_JS_VERSION" =~ ^20 ]];
   then
-    bash "$BASEDIR/install-node-source.sh"
+    NODE_JS_SOURCE_VERSION="$NODE_JS_VERSION"
+    if echo $NODE_JS_VERSION | grep -q ^20 ; then
+      # Node.js 20.11.1 is the last 20.x that builds out of the box on RHEL7
+      # https://github.com/nodejs/node/issues/52223
+      NODE_JS_SOURCE_VERSION=20.11.1
+    fi
+    env NODE_JS_VERSION="$NODE_JS_SOURCE_VERSION" bash "$BASEDIR/install-node-source.sh"
+    nvm use $NODE_JS_SOURCE_VERSION
   else
     echo nvm install --no-progress $NODE_JS_VERSION && nvm alias default $NODE_JS_VERSION
     nvm install --no-progress $NODE_JS_VERSION
     nvm alias default $NODE_JS_VERSION
+    nvm use $NODE_JS_VERSION
   fi
-  nvm use $NODE_JS_VERSION
   set -x
 
   if env PATH="/opt/chefdk/gitbin:$PATH" git --version | grep -q 'git version 1.'; then
@@ -58,7 +72,7 @@ else
   npm cache clear --force || true # Try to work around `Cannot read property 'pickAlgorithm' of null` errors in CI
   # Started observing CI failures on RHEL 7.2 (s390x) for installing npm, all
   # related to network issues hence adding a retry with backoff here.
-  bash "$BASEDIR/retry-with-backoff.sh" npm i -g npm@9.x
+  bash "$BASEDIR/retry-with-backoff.sh" npm i -g npm@$NPM_VERSION
 fi
 
 . "$BASEDIR/setup-env.sh"

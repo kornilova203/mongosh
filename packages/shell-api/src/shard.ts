@@ -394,9 +394,10 @@ export default class Shard extends ShellApiWithMongoClass {
   @apiVersions([1])
   @serverVersions(['3.4.0', '6.0.2'])
   async enableAutoSplit(): Promise<UpdateResult> {
+    const connectionInfo = await this._instanceState.fetchConnectionInfo();
     if (
-      this._instanceState.connectionInfo.buildInfo.version &&
-      semver.gte(this._instanceState.connectionInfo.buildInfo.version, '6.0.3')
+      connectionInfo?.buildInfo?.version &&
+      semver.gte(connectionInfo.buildInfo.version, '6.0.3')
     ) {
       await this._instanceState.printDeprecationWarning(
         'Starting in MongoDB 6.0.3, automatic chunk splitting is not performed. This is because of balancing policy improvements. Auto-splitting commands still exist, but do not perform an operation. For details, see Balancing Policy Changes: https://www.mongodb.com/docs/manual/release-notes/6.0/#balancing-policy-changes\n'
@@ -417,9 +418,10 @@ export default class Shard extends ShellApiWithMongoClass {
   @apiVersions([1])
   @serverVersions(['3.4.0', '6.0.2'])
   async disableAutoSplit(): Promise<UpdateResult> {
+    const connectionInfo = await this._instanceState.fetchConnectionInfo();
     if (
-      this._instanceState.connectionInfo.buildInfo.version &&
-      semver.gte(this._instanceState.connectionInfo.buildInfo.version, '6.0.3')
+      connectionInfo?.buildInfo?.version &&
+      semver.gte(connectionInfo.buildInfo.version, '6.0.3')
     ) {
       await this._instanceState.printDeprecationWarning(
         'Starting in MongoDB 6.0.3, automatic chunk splitting is not performed. This is because of balancing policy improvements. Auto-splitting commands still exist, but do not perform an operation. For details, see Balancing Policy Changes: https://www.mongodb.com/docs/manual/release-notes/6.0/#balancing-policy-changes\n'
@@ -484,7 +486,7 @@ export default class Shard extends ShellApiWithMongoClass {
   async balancerCollectionStatus(ns: string): Promise<Document> {
     assertArgsDefinedType([ns], ['string'], 'Shard.balancerCollectionStatus');
     this._emitShardApiCall('balancerCollectionStatus', { ns });
-    return this._database._runAdminCommand({
+    return this._database._runAdminReadCommand({
       balancerCollectionStatus: ns,
     });
   }
@@ -538,7 +540,7 @@ export default class Shard extends ShellApiWithMongoClass {
   async isBalancerRunning(): Promise<Document> {
     this._emitShardApiCall('isBalancerRunning', {});
     await getConfigDB(this._database);
-    return this._database._runAdminCommand({
+    return this._database._runAdminReadCommand({
       balancerStatus: 1,
     });
   }
@@ -548,7 +550,7 @@ export default class Shard extends ShellApiWithMongoClass {
   async startBalancer(timeout = 60000): Promise<Document> {
     assertArgsDefinedType([timeout], ['number'], 'Shard.startBalancer');
     this._emitShardApiCall('startBalancer', { timeout });
-    return this._database._runAdminCommand({
+    return this._database._runAdminReadCommand({
       balancerStart: 1,
       maxTimeMS: timeout,
     });
@@ -689,6 +691,90 @@ export default class Shard extends ShellApiWithMongoClass {
 
     return this._database._runAdminCursorCommand({
       checkMetadataConsistency: 1,
+    });
+  }
+
+  @returnsPromise
+  @serverVersions(['5.0.0', ServerVersions.latest])
+  async shardAndDistributeCollection(
+    ns: string,
+    key: Document,
+    unique?: boolean | Document,
+    options?: Document
+  ): Promise<Document> {
+    this._emitShardApiCall('shardAndDistributeCollection', {
+      ns,
+      key,
+      unique,
+      options,
+    });
+    await this.shardCollection(ns, key, unique, options);
+    // SERVER-92762: Prevent unequal data distribution by setting
+    // numInitialChunks to 1000.
+    const numInitialChunks =
+      typeof unique === 'object'
+        ? unique.numInitialChunks
+        : options?.numInitialChunks;
+    return await this.reshardCollection(ns, key, {
+      numInitialChunks: numInitialChunks ?? 1000,
+      forceRedistribution: true,
+    });
+  }
+
+  @serverVersions(['8.0.0', ServerVersions.latest])
+  @apiVersions([])
+  @returnsPromise
+  async moveCollection(ns: string, toShard: string): Promise<Document> {
+    assertArgsDefinedType(
+      [ns, toShard],
+      ['string', 'string'],
+      'Shard.moveCollection'
+    );
+    this._emitShardApiCall('moveCollection', { moveCollection: ns, toShard });
+    return await this._database._runAdminCommand({
+      moveCollection: ns,
+      toShard,
+    });
+  }
+
+  @serverVersions(['8.0.0', ServerVersions.latest])
+  @apiVersions([])
+  @returnsPromise
+  async abortMoveCollection(ns: string): Promise<Document> {
+    assertArgsDefinedType([ns], ['string'], 'Shard.abortMoveCollection');
+    this._emitShardApiCall('abortMoveCollection', { abortMoveCollection: ns });
+    return await this._database._runAdminCommand({ abortMoveCollection: ns });
+  }
+
+  @serverVersions(['8.0.0', ServerVersions.latest])
+  @apiVersions([])
+  @returnsPromise
+  async unshardCollection(ns: string, toShard: string): Promise<Document> {
+    assertArgsDefinedType(
+      [ns, toShard],
+      ['string', 'string'],
+      'Shard.unshardCollection'
+    );
+    this._emitShardApiCall('unshardCollection', {
+      unshardCollection: ns,
+      toShard,
+    });
+    return await this._database._runAdminCommand({
+      unshardCollection: ns,
+      toShard,
+    });
+  }
+
+  @serverVersions(['8.0.0', ServerVersions.latest])
+  @apiVersions([])
+  @returnsPromise
+  async abortUnshardCollection(ns: string): Promise<Document> {
+    assertArgsDefinedType([ns], ['string'], 'Shard.abortUnshardCollection');
+    this._emitShardApiCall('abortUnshardCollection', {
+      abortUnshardCollection: ns,
+    });
+    return await this._database._runAdminCommand({
+      abortUnshardCollection: ns,
     });
   }
 }
